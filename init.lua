@@ -1,255 +1,673 @@
+npc = {
+	proc = {}
+}
 
--- Zombie by BlockMen
+local _npc = {
+	dsl = {},
+	proc = {}
+}
 
-mobs:register_mob("zombie2:zombie", {
-	type = "monster",
-	passive = false,
-	attack_type = "dogfight",
-	damage = 4,
-	hp_min = 12,
-	hp_max = 35,
-	armor = 150,
-	collisionbox = {-0.25, -1, -0.3, 0.25, 0.75, 0.3},
-	visual = "mesh",
-	mesh = "creatures_mob.x",
-	textures = {
-		{"mobs_zombie.png"},
-	},
-	visual_size = {x=1, y=1},
-	makes_footstep_sound = true,
-	sounds = {
-		random = "mobs_zombie.1",
-		damage = "mobs_zombie_hit",
-		attack = "mobs_zombie.3",
-		death = "mobs_zombie_death",
-	},
-	walk_velocity = 0.5,
-	run_velocity = 1.75,
-	jump = true,
-	floats = 0,
-	view_range = 12,
-	drops = {
-		{name = "zombie:rotten_flesh",
-		chance = 2, min = 3, max = 5,},
-	},
-	water_damage = 0,
-	lava_damage = 1,
-	light_damage = 0,
-	animation = {
-		speed_normal = 10,		speed_run = 15,
-		stand_start = 0,		stand_end = 79,
-		walk_start = 168,		walk_end = 188,
-		run_start = 168,		run_end = 188,
---		punch_start = 168,		punch_end = 188,
-	},
-	on_rightclick = function(self, clicker)
-		minetest.log(dump(self))
-	end,
-	on_die = function(self, pos)
-		local meta = minetest.get_meta(self.spawn.pos)
-		meta:set_int("entity_killed_count", meta:get_int("entity_killed_count") + 1)
+npc.ANIMATION_STAND_START = 0
+npc.ANIMATION_STAND_END = 79
+npc.ANIMATION_SIT_START = 81
+npc.ANIMATION_SIT_END = 160
+npc.ANIMATION_LAY_START = 162
+npc.ANIMATION_LAY_END = 166
+npc.ANIMATION_WALK_START = 168
+npc.ANIMATION_WALK_END = 187
+npc.ANIMATION_MINE_START = 189
+npc.ANIMATION_MINE_END =198
+
+local program_table = {}
+local instruction_table = {}
+
+local programs = {}
+local instructions = {}
+
+_npc.dsl.evaluate_boolean_expression = function(self, expr, args)
+	local operator = expr.op
+	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
+	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
+	
+	if operator == "==" then
+		return source == target
+	elseif operator == ">=" then
+		return source >= target
+	elseif operator == "<=" then
+		return source <= target
+	elseif operator == "~=" then
+		return source ~= target
+	elseif operator == "<" then
+		return source < target
+	elseif operator == ">" then
+		return source > target
 	end
-})
-
---name, nodes, neighbours, minlight, maxlight, interval, chance, active_object_count, min_height, max_height
--- mobs:spawn({
--- 	name = "zombie:zombie",
--- 	nodes = {"default:dirt_with_grass"},
--- 	min_light = 0,
--- 	max_light = 7,
--- 	chance = 9000,
--- 	active_object_count = 2,
--- 	min_height = 0,
--- 	day_toggle = false,
--- })
-
-local min_player_distance = 5 --20
-local max_mob_count = 5 --15
-local max_spawn_interval = 10 --300
-local min_spawn_interval = 5 --120
-local spawn_radius = 5
-local min_kill_count = 5
-local max_kill_count = 10
-local min_deactivation_time = 5
-local max_deactivation_time = 5
-local spawner_textures = {"wool_red.png"}
-local spawn_on_dig = true
-
-local function spawn(pos, entity_name, force)
-	-- Check for players nearby
-	local objects = minetest.get_objects_inside_radius(pos, min_player_distance)
-	local timer = minetest.get_node_timer(pos)
-	local interval = math.random(min_spawn_interval, max_spawn_interval)
-
-	local entity_count = 0
-	for _,object in pairs(objects) do
-		if object and object:is_player() and not force then
-			minetest.log("Player too close")
-			-- Re-schedule
-			timer:start(interval)
-			minetest.log("Next spawning scheduled in "..interval.." seconds")
-			return
-		end
-	end
-
-	local meta = minetest.get_meta(pos)
-	local entity_spawn_count = meta:get_int("entity_spawn_count")
-
-	-- Check for amount nearby
-	if force or (entity_spawn_count <= max_mob_count) then
-		-- Spawn
-		local spawn_pos = {x=pos.x + math.random(0, spawn_radius), y=pos.y+1, z=pos.z + math.random(0, spawn_radius)}
-		-- Check spawn position - if not air, then spawn just above the spawner
-		local spawn_node = minetest.get_node_or_nil(spawn_pos)
-		if spawn_node and spawn_node.name ~= "air" then
-			spawn_pos = pos
-		end
-		minetest.log("Spawning "..entity_name.." at pos "..minetest.pos_to_string(spawn_pos))
-		local entity = minetest.add_entity(spawn_pos, entity_name)
-		if entity then
-			entity:get_luaentity().entity_name = entity_name
-			entity:get_luaentity().spawn = {
-				pos = pos
-			}
-		end
-	else
-		minetest.log("Max spawn limit reached")
-	end
-
-	-- Re-schedule
-	timer:start(interval)
-	minetest.log("Next spawning scheduled in "..interval.." seconds")
 end
 
-minetest.register_node("zombie2:zombie_spawner", {
-	description = "Zombie Spawner",
-	drop = "zombie2:zombie_spawner",
-	tiles = {"wool_red.png"},
-	groups = {crumbly=2, soil = 2},
-	sounds = default.node_sound_sand_defaults(),
-	on_construct = function(pos)
-		local meta = minetest.get_meta(pos)
-		meta:set_int("entity_spawn_count", 0)
-		meta:set_int("entity_killed_count", 0)
-		meta:set_int("next_deactivation_count", math.random(min_kill_count, max_kill_count))
-		meta:set_int("next_deactivation_time", math.random(min_deactivation_time, max_deactivation_time))
-
-		local timer = minetest.get_node_timer(pos)
-		timer:start(min_spawn_interval)
-	end,
-	on_timer = function(pos)
-		spawn(pos, "zombie2:zombie")
-	end,
-	on_dig = function(pos, node, digger)
-		local meta = minetest.get_meta(pos)
-		local entity_killed_count = meta:get_int("entity_killed_count")
-		local next_deactivation_count = meta:get_int("next_deactivation_count")
-		if (entity_killed_count < next_deactivation_count) then
-			if spawn_on_dig then
-				spawn(pos, "zombie2:zombie", true)
+_npc.dsl.evaluate_argument = function(self, expr, args)
+	if type(expr) == "string" then
+		if expr:sub(1,1) == "@" then
+			local expression_values = string.split(expr, ".")
+			local storage_type = expression_values[1]
+			--minetest.log("Expression: "..dump(expression_values))
+			if storage_type == "@local" then
+				--minetest.log("Data: "..dump(self.data))
+				return self.data.proc[#self.process.queue][expression_values[2]]
+			elseif storage_type == "@global" then
+				return self.data.global[expression_values[2]]
+			elseif storage_type == "@env" then
+				return self.data.env[expression_values[2]]
 			end
-			minetest.chat_send_player(digger:get_player_name(), "You have killed "..entity_killed_count.." enemies!")
-			return false
-		else
-			minetest.node_dig(pos, node, digger)
 		end
+	elseif type(expr) == "table" and expr.left and expr.right and expr.op then
+		return _npc.dsl.evaluate_boolean_expression(self, expr, args)
+	elseif type(expr) == "function" then
+		return expr(self, args)
 	end
-})
+	return expr
+end
 
-local perl1 = {SEED1 = 9130, OCTA1 = 3,	PERS1 = 0.5, SCAL1 = 250} -- Values should match minetest mapgen V6 desert noise.
+-- Nil-safe set variable function
+_npc.dsl.set_var = function(self, key, value)
+	if self.data.proc[self.process.current.id] == nil then
+		self.data.proc[self.process.current.id] = {}
+	end
+	
+	self.data.proc[self.process.current.id][key] = value
+end
 
-local function hlp_fnct(pos, name)
-	local n = minetest.get_node_or_nil(pos)
-	if n and n.name and n.name == name then
-		return true
-	else
+_npc.dsl.get_var = function(self, key)
+	if self.data.proc[self.process.current.id] == nil then return nil end
+	return self.data.proc[self.process.current.id][key]
+end
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Program and Instruction Registration
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+npc.proc.register_program = function(name, raw_instruction_list)
+	if program_table[name] ~= nil then
 		return false
-	end
-end
-local function ground(pos, old)
-	local p2 = pos
-	while hlp_fnct(p2, "air") do
-		p2.y = p2.y -1
-	end
-	if p2.y < old.y then
-		return p2
 	else
-		return old
+		-- Interpret program queue
+		-- Convert if, for and while to index-jump instructions
+		local instruction_list = {}
+		for _,instruction in ipairs(raw_instruction_list) do
+		
+			if instruction.name == "npc:if" then
+				-- Insert jump to skip true instructions if expr is false
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:jump_if", 
+					args = {
+						expr = instruction.args.expr, 
+						pos = #instruction_list + 1 + #instruction.args.true_instructions + 1, 
+						negate = true
+					}
+				}
+				
+				-- Insert all true_instructions
+				for _,instr in ipairs(instruction.args.true_instructions) do
+					instruction_list[#instruction_list + 1] = instr
+				end
+				
+				-- Insert jump to skip false instructions if expr is true
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:jump", 
+					args = {
+						pos = #instruction_list + 1 + #instruction.args.false_instructions + 1, 
+					}
+				}
+				
+				-- Insert all false_instructions
+				for _,instr in ipairs(instruction.args.false_instructions) do
+					instruction_list[#instruction_list + 1] = instr
+				end
+				
+			elseif instruction.name == "npc:while" then
+			
+				-- The below will actually set the jump to the instruction previous
+				-- to the relevant one - this is done because after the jump
+				-- instruction is executed, the instruction counter will be increased
+				local loop_start = #instruction_list
+				-- Insert all loop instructions
+				for _,instr in ipairs(instruction.args.loop_instructions) do
+					instruction_list[#instruction_list + 1] = instr
+				end
+				
+				-- Insert conditional to loop back if expr is true
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:jump_if", 
+					args = {
+						expr = instruction.args.expr, 
+						pos = loop_start, 
+						negate = false
+					}
+				}
+				
+			elseif instruction.name == "npc:for" then
+			
+				-- Initialize loop variable
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_index", 
+						value = instruction.args.initial_value
+					}
+				}
+			
+				-- The below will actually set the jump to the instruction previous
+				-- to the relevant one - this is done because after the jump
+				-- instruction is executed, the instruction counter will be increased
+				local loop_start = #instruction_list
+				-- Insert all loop instructions
+				for _,instr in ipairs(instruction.args.loop_instructions) do
+					instruction_list[#instruction_list + 1] = instr
+				end
+				
+				-- Insert loop variable increase instruction
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_index", 
+						value = function(self, args)
+							return self.data.proc[self.process.current.id]["for_index"] 
+								+ instruction.args.step_increase
+						end
+					}
+				}
+				
+				-- Insert conditional to loop back if expr is true
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:jump_if", 
+					args = {
+						expr = instruction.args.expr,
+						pos = loop_start, 
+						negate = false
+					}
+				}
+				
+			elseif instruction.name == "npc:for_each" then
+			
+				--assert(type(instruction.args.array) == "table")
+			
+				-- Initialize loop variables
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_index", 
+						value = 1
+					}
+				}
+				
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_value", 
+						value = function(self, args)
+						
+						end
+					}
+				}
+			
+				-- The below will actually set the jump to the instruction previous
+				-- to the relevant one - this is done because after the jump
+				-- instruction is executed, the instruction counter will be increased
+				local loop_start = #instruction_list
+				-- Insert all loop instructions
+				for _,instr in ipairs(instruction.args.loop_instructions) do
+					instruction_list[#instruction_list + 1] = instr
+				end
+				
+				-- Insert loop variable increase instruction
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_index", 
+						value = function(self, args)
+							return self.data.proc[self.process.current.id]["for_index"] + 1
+						end
+					}
+				}
+				
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:var:set", 
+					args = {
+						key = "for_value", 
+						value = function(self, args)
+							return instruction.args.array[self.data.proc[self.process.current.id].for_index]
+						end
+					}
+				}
+				
+				-- Insert conditional to loop back if expr is true
+				instruction_list[#instruction_list + 1] = {
+					name = "npc:jump_if", 
+					args = {
+						expr = instruction.args.expr,
+						pos = loop_start, 
+						negate = false
+					}
+				}
+				
+			else
+				-- Insert the instruction
+				instruction_list[#instruction_list + 1] = instruction
+			end
+		end
+	
+		program_table[name] = instruction_list
+		minetest.log(dump(program_table))
+		return true
 	end
 end
 
-minetest.register_on_generated(function(minp, maxp, seed)
+npc.proc.register_instruction = function(name, instruction)
+	if instruction_table[name] ~= nil then
+		return false
+	else
+		instruction_table[name] = instruction
+		return true
+	end
+end
 
-	-- Chance check
-	if math.random(0,10) > 7 then return end
+-----------------------------------------------------------------------------------
+-- DSL Instructions
+-----------------------------------------------------------------------------------
+-- Variable instructions
+npc.proc.register_instruction("npc:var:get", function(self, args)
+	_npc.dsl.get_var(self, args.key)
+end)
 
-	if maxp.y < 0 then return end
-	math.randomseed(seed)
-	local cnt = 0
+npc.proc.register_instruction("npc:var:set", function(self, args)
+	_npc.dsl.set_var(self, args.key, args.value)
+end)
 
-	local perlin1 = minetest.env:get_perlin(perl1.SEED1, perl1.OCTA1, perl1.PERS1, perl1.SCAL1)
-	local noise1 = perlin1:get2d({x=minp.x,y=minp.y})--,z=minp.z})
+-- Control instructions
+npc.proc.register_instruction("npc:if", function(self, args) end)
+npc.proc.register_instruction("npc:while", function(self, args) end)
+npc.proc.register_instruction("npc:for", function(self, args) end)
+npc.proc.register_instruction("npc:for_each", function(self, args) end)
 
-	if noise1 > 0.25 or noise1 < -0.26 then
-	 local mpos = {x=math.random(minp.x,maxp.x), y=math.random(minp.y,maxp.y), z=math.random(minp.z,maxp.z)}
+npc.proc.register_instruction("npc:jump", function(self, args)
+	self.process.current.instruction = args.pos
+end)
 
-		local p2 = minetest.find_node_near(mpos, 25, {"default:dirt_with_grass", "default:dirt_with_snow"})
-		while p2 == nil and cnt < 5 do
-			cnt = cnt+1
-			mpos = {x=math.random(minp.x,maxp.x), y=math.random(minp.y,maxp.y), z=math.random(minp.z,maxp.z)}
-			p2 = minetest.find_node_near(mpos, 25, {"default:dirt_with_grass", "default:dirt_with_snow"})
-		end
-		if p2 == nil then return end
-		if p2.y < 0 then return end
-
-		local off = 0
-
-		-- Simpler finding routine - check if node immediately above is air,
-		-- and if node 16 blocks above is air
-		minetest.log("Checking pos to spawn: "..minetest.pos_to_string(p2))
-		local next_node_above = minetest.get_node_or_nil({x=p2.x, y=p2.y+1, z=p2.z})
-		local next_mapblock_above = minetest.get_node_or_nil({x=p2.x, y=p2.y+16, z=p2.z})
-		if next_node_above and next_node_above.name and next_node_above.name == "air" and
-			 next_mapblock_above and next_mapblock_above.name and next_mapblock_above.name == "air" then
-
-				 -- Create spawner
-				 minetest.after(0.8, function(pos)
-					 minetest.log("Creating advanced spawner at "..minetest.pos_to_string(pos))
-					 minetest.set_node(pos, {name="zombie2:zombie_spawner"})
-				 end, p2)
-
-		end
-
-		-- local opos1 = {x=p2.x+22,y=p2.y-1,z=p2.z+22}
-		-- local opos2 = {x=p2.x+22,y=p2.y-1,z=p2.z}
-		-- local opos3 = {x=p2.x,y=p2.y-1,z=p2.z+22}
-		-- local opos1_n = minetest.get_node_or_nil(opos1)
-		-- local opos2_n = minetest.get_node_or_nil(opos2)
-		-- local opos3_n = minetest.get_node_or_nil(opos3)
-		-- if opos1_n and opos1_n.name and opos1_n.name == "air" then
-		-- 	p2 = ground(opos1, p2)
-		-- end
-		-- if opos2_n and opos2_n.name and opos2_n.name == "air" then
-		-- 	p2 = ground(opos2, p2)
-		-- end
-		-- if opos3_n and opos3_n.name and opos3_n.name == "air" then
-		-- 	p2 = ground(opos3, p2)
-		-- end
-		-- p2.y = p2.y - 3
-		-- if p2.y < 0 then p2.y = 0 end
-		--if minetest.find_node_near(p2, 25, {"default:water_source"}) ~= nil or minetest.find_node_near(p2, 22, {"default:dirt_with_grass"}) ~= nil or minetest.find_node_near(p2, 52, {"default:sandstonebrick"}) ~= nil then return end
-
-		--minetest.after(0.8,make,p2)
+npc.proc.register_instruction("npc:jump_if", function(self, args)
+	local condition = args.expr
+	if args.negate then condition = not condition end
+	if condition then
+		--minetest.log("Target instruction: "..dump(program_table[self.process.current.name][args.pos]))
+		self.process.current.instruction = args.pos
 	end
 end)
 
+npc.proc.register_instruction("npc:move:rotate", function(self, args)
+	local dir = vector.dir(self.object:get_pos(), args.target_pos)
+	local yaw = minetest.dir_to_yaw(dir)
+	self.object:set_yaw(yaw)
+end)
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Process API
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+npc.proc.execute_program = function(self, name, args)
+	-- Enqueue process
+	self.process.queue[#self.process.queue + 1] = {
+		name = name,
+		args = args,
+		instruction = 1
+	}
+	
+	self.process.current.key = (self.process.current.key + 1) % 100
+	
+	self.process.current = self.process.queue[#self.process.queue]
+end
+
+_npc.proc.execute_instruction = function(self, name, raw_args)
+	assert(instruction_table[name] ~= nil)
+	local args = {}
+	if raw_args then
+		for key,value in pairs(raw_args) do
+			args[key] = _npc.dsl.evaluate_argument(self, value, raw_args)
+		end
+	end
+	
+	instruction_table[name](self, args)
+	if name == "npc:jump" 
+		or name == "npc:jump_if" 
+		or name == "npc:var:get" 
+		or name == "npc:var:set" then
+		-- Execute next instruction now if possible
+		self.process.current.instruction = self.process.current.instruction + 1
+		local instruction = program_table[self.process.current.name][self.process.current.instruction]
+		if instruction then
+			_npc.proc.execute_instruction(self, instruction.name, instruction.args)
+		end
+	end
+end
+
+npc.proc.enqueue_process = function(self, name, args)
+	-- Enqueue process
+	self.process.queue[self.process.queue_tail] = {
+		id = self.process.key,
+		name = name,
+		args = args,
+		instruction = 1
+	}
+	
+	self.process.current.key = (self.process.current.key + 1) % 100
+	
+	local next_tail = (self.process.queue_tail + 1) % 100
+	if next_tail == 0 then next_tail = 1 end
+	self.process.queue_tail = next_tail
+	
+	-- If current process is state process, execute the new process immediately
+	-- TODO: Check if this actually works
+	if self.process.current.name == self.process.state.name then
+		self.process.current = self.process.queue[self.process.queue_head]
+	end
+end
+
+npc.proc.set_state_process = function(self, name, args)
+	self.process.state.id = self.process.key
+	self.process.state.name = name
+	self.process.state.args = args
+end
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Built-in instructions
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+
+-- Stupid program that walks on a square
+npc.proc.register_program("sample:stupid", {
+	{name = "npc:for", args = {
+		initial_value = 0,
+		step_increase = 2, 
+		expr = {left="@local.for_index", op="<=", right=6},
+		loop_instructions = {
+			{name = "builtin:walk_step", args = {dir = "@local.for_index"}}
+		}
+	}}
+})
 
 
+-- Sample state program
+npc.proc.register_program("builtin:idle", {
+	{name = "builtin:stand"},
+	{name = "npc:for_each", args = {
+			array = "@env.objects",
+			loop_instructions = {
+				{name = "npc:if", args = {
+					expr = function(self)
+						minetest.log("Self data: "..dump(self.data))
+						local object = self.data.proc[self.process.current.id].for_value
+						if object then
+							local object_pos = object:get_pos()
+							local self_pos = self.object:get_pos()
+							return vector.distance(object_pos, self_pos) < 4
+						end
+						return false
+					end, 
+					true_instructions = {
+						{name = "npc:move:rotate", args={target_pos="@local.for_value"}}
+					}}
+				}
+			}
+		}
+	}
+})
 
-mobs:register_egg("zombie2:zombie", "Zombie", "zombie_head.png", 0)
+-- Sample walk program
+npc.proc.register_instruction("builtin:stand", function(self, args)
+	self.object:set_velocity({x=0, y=0, z=0})
+	self.object:set_animation({
+        x = npc.ANIMATION_STAND_START,
+        y = npc.ANIMATION_STAND_END},
+        30, 0)
+end)
 
-minetest.register_craftitem("zombie2:rotten_flesh", {
-	description = "Rotten Flesh",
-	inventory_image = "mobs_rotten_flesh.png",
-	on_use = minetest.item_eat(-5),
+npc.proc.register_instruction("builtin:walk_step", function(self, args)
+	
+	local speed = 1
+	local vel = {}
+	local dir = args.dir
+	minetest.log("dir: "..dump(dir))
+	if dir == 0 then
+        vel = {x=0, y=0, z=speed}
+    elseif dir == 1 then
+        vel = {x=speed, y=0, z=speed}
+    elseif dir == 2 then
+        vel = {x=speed, y=0, z=0}
+    elseif dir == 3 then
+        vel = {x=speed, y=0, z=-speed}
+    elseif dir == 4 then
+        vel = {x=0, y=0, z=-speed}
+    elseif dir == 5 then
+        vel = {x=-speed, y=0, z=-speed}
+    elseif dir == 6 then
+        vel = {x=-speed, y=0, z=0}
+    elseif dir == 7 then
+        vel = {x=-speed, y=0, z=speed }
+    end
+    
+    
+	local yaw = minetest.dir_to_yaw(vector.direction(self.object:get_pos(), vector.add(self.object:get_pos(), vel)))
+	self.object:set_yaw(yaw)
+	self.object:set_velocity(vel)
+	self.object:set_animation({
+        x = npc.ANIMATION_WALK_START,
+        y = npc.ANIMATION_WALK_END},
+        30, 0)
+end)
+
+npc.proc.register_program("builtin:walk_example", {
+	{name = "builtin:walk_step", args = {dir = 0}},
+	{name = "builtin:walk_step", args = {dir = 0}},
+	{name = "builtin:walk_step", args = {dir = 0}},
+	{name = "builtin:walk_step", args = {dir = 2}},
+	{name = "builtin:stand"}
+})
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Lua Entity Callbacks															 --
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+local do_step = function(self, dtime)
+	
+	self.timers.node_below_value = self.timers.node_below_value + dtime
+	self.timers.objects_value = self.timers.objects_value + dtime
+	self.timers.proc_value = self.timers.proc_value + dtime
+	-- Check node below NPC
+	if (self.timers.node_below_value > self.timers.node_below_value) then
+		local current_pos = self.object:get_pos()
+		self.data.env.node_on = minetest.get_node_or_nil({x=current_pos.x, y=current_pos.y-1, z=current_pos.z})
+	end
+	
+	-- Get objects around NPC on radius
+	if (self.timers.objects_value > self.timers.objects_int) then
+		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
+	end
+	
+	-- Process queue
+	if (self.timers.proc_value > self.timers.proc_int) then
+		self.timers.proc_value = 0
+		--minetest.log("Process: "..dump(self.process))
+	
+		-- Check if there is a current process
+		if self.process.current.name ~= nil then
+			
+			-- Check if there is a next instruction
+			if self.process.current.instruction > #program_table[self.process.current.name] then
+				-- If process is state process, reset instruction counter
+				if self.process.current.name == self.process.state.name then
+					self.process.current.instruction = 1
+				else
+					-- No more instructions, deque process
+					local next_head = (self.process.queue_head + 1) % 100
+					if next_head == 0 then next_head = 1 end
+					self.process.queue[self.process.queue_head] = nil
+					self.process.queue_head = next_head
+					self.process.current.name = nil
+					self.process.current.instruction = -1
+				end
+				-- Check if no more processes in queue
+				if self.process.queue_tail - self.process.queue_head == 0 then
+					-- Execute state process, if present
+					if self.process.state.name ~= nil then
+						self.process.current.id = self.process.state.id
+						self.process.current.name = self.process.state.name
+						self.process.current.args = self.process.state.args
+						self.process.current.instruction = 1
+					end
+				else
+					-- Execute next process in queue
+					-- The deque should reduce the #self.process.queue
+					self.process.current = self.process.queue[self.process.queue_head]
+				end
+			end
+		else
+			-- Check if there is a process in queue
+			if self.process.queue_tail - self.process.queue_head ~= 0 then
+				self.process.current = self.process.queue[self.process.queue_head]
+		
+			-- Check if there is a state process
+			elseif self.process.state.name ~= nil then
+				self.process.current.id = self.process.state.id
+				self.process.current.name = self.process.state.name
+				self.process.current.args = self.process.state.args
+				self.process.current.instruction = 1
+			end
+		end
+	
+		-- Execute next instruction, if available
+		if self.process.current.instruction > -1 then
+			local instruction = 
+				program_table[self.process.current.name][self.process.current.instruction]
+			_npc.proc.execute_instruction(self, instruction.name, instruction.args)
+			self.process.current.instruction = self.process.current.instruction + 1
+		end
+	end
+
+end
+
+minetest.register_entity("anpc:npc", {
+	hp_max = 1,
+	visual = "mesh",
+	mesh = "character.b3d",
+	textures = {
+		"default_male.png",
+	},
+	visual_size = {x = 1, y = 1, z = 1},
+	collisionbox = {-0.6,-0.6,-0.6, 0.6,0.6,0.6},
+	physical = true,
+	on_activate = function(self, staticdata)
+
+		minetest.log("Data: "..staticdata)
+
+		if staticdata ~= nil and staticdata ~= "" then
+			local cols = string.split(staticdata, "|")
+			self["timers"] = minetest.deserialize(cols[1])
+			self["process"] = minetest.deserialize(cols[2])
+			self["data"] = minetest.deserialize(cols[3])
+		else
+			
+			self.timers = {
+				node_below_value = 0,
+				node_below_int = 0.5,
+				objects_value = 0,
+				objects_int = 1,
+				proc_value = 0,
+				proc_int = 0.5
+			}
+			
+			self.process = {
+				key = 0,
+				current = {
+					id = -1,
+					name = nil,
+					args = {},
+					instruction = -1
+				},
+				state = {
+					id = -1,
+					name = nil,
+					args = {}
+				},
+				queue_head = 1,
+				queue_tail = 1,
+				queue = {}
+			}
+			
+			self.data = {
+				env = {},
+				global = {},
+				proc = {}
+			}
+			
+			self.data.env.view_range = 12
+			
+			self.schedule = {}
+			
+			self.state = {
+				walk = {
+					target_pos = {}
+				}
+			}
+		end
+		
+	end,
+	get_staticdata = function(self)
+	
+		local result = ""
+		if self.timers then
+			result = result..minetest.serialize(self.timers).."|"
+		end
+		
+		if self.process then
+			result = result..minetest.serialize(self.process).."|"
+		end
+		
+		if self.data then
+			self.data.env.objects = nil
+			result = result..minetest.serialize(self.data).."|"
+		end
+		
+		return result
+	
+	end,
+	on_step = do_step,
+	on_punch = function(self, puncher, time_from_last_punch, tool_capabilities, dir)
+		minetest.log(dump(self))
+	end
+})
+
+minetest.register_craftitem("anpc:npc_spawner", {
+	description = "Spawner",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		local spawn_pos = minetest.pointed_thing_to_face_pos(user, pointed_thing)
+		spawn_pos.y = spawn_pos.y + 1
+		local entity = minetest.add_entity(spawn_pos, "anpc:npc")
+		if entity then
+			npc.proc.set_state_process(entity:get_luaentity(), "builtin:idle")
+		else
+			minetest.remove_entity(entity)
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:npc_walker", {
+	description = "Walker",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			npc.proc.enqueue_process(pointed_thing.ref:get_luaentity(), "sample:stupid", {})
+		end
+	end
 })
