@@ -28,7 +28,7 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local operator = expr.op
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
-	
+
 	if operator == "==" then
 		return source == target
 	elseif operator == ">=" then
@@ -49,15 +49,23 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 		if expr:sub(1,1) == "@" then
 			local expression_values = string.split(expr, ".")
 			local storage_type = expression_values[1]
-			--minetest.log("Expression: "..dump(expression_values))
+			local result = nil
 			if storage_type == "@local" then
 				--minetest.log("Data: "..dump(self.data))
-				return self.data.proc[#self.process.queue][expression_values[2]]
+				result = self.data.proc[#self.process.queue][expression_values[2]]
 			elseif storage_type == "@global" then
-				return self.data.global[expression_values[2]]
+				result = self.data.global[expression_values[2]]
 			elseif storage_type == "@env" then
-				return self.data.env[expression_values[2]]
+				result = self.data.env[expression_values[2]]
 			end
+			if #expression_values > 2 then
+				-- The third element is an array index
+				return result[expression_values[3]]
+			else
+				return result
+			end
+			--minetest.log("Expression: "..dump(expression_values))
+
 		end
 	elseif type(expr) == "table" and expr.left and expr.right and expr.op then
 		return _npc.dsl.evaluate_boolean_expression(self, expr, args)
@@ -72,7 +80,7 @@ _npc.dsl.set_var = function(self, key, value)
 	if self.data.proc[self.process.current.id] == nil then
 		self.data.proc[self.process.current.id] = {}
 	end
-	
+
 	self.data.proc[self.process.current.id][key] = value
 end
 
@@ -94,38 +102,38 @@ npc.proc.register_program = function(name, raw_instruction_list)
 		-- Convert if, for and while to index-jump instructions
 		local instruction_list = {}
 		for _,instruction in ipairs(raw_instruction_list) do
-		
+
 			if instruction.name == "npc:if" then
 				-- Insert jump to skip true instructions if expr is false
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:jump_if", 
+					name = "npc:jump_if",
 					args = {
-						expr = instruction.args.expr, 
-						pos = #instruction_list + 1 + #instruction.args.true_instructions + 1, 
+						expr = instruction.args.expr,
+						pos = #instruction_list + 1 + #instruction.args.true_instructions + 1,
 						negate = true
 					}
 				}
-				
+
 				-- Insert all true_instructions
 				for _,instr in ipairs(instruction.args.true_instructions) do
 					instruction_list[#instruction_list + 1] = instr
 				end
-				
+
 				-- Insert jump to skip false instructions if expr is true
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:jump", 
+					name = "npc:jump",
 					args = {
-						pos = #instruction_list + 1 + #instruction.args.false_instructions + 1, 
+						pos = #instruction_list + 1 + #instruction.args.false_instructions + 1,
 					}
 				}
-				
+
 				-- Insert all false_instructions
 				for _,instr in ipairs(instruction.args.false_instructions) do
 					instruction_list[#instruction_list + 1] = instr
 				end
-				
+
 			elseif instruction.name == "npc:while" then
-			
+
 				-- The below will actually set the jump to the instruction previous
 				-- to the relevant one - this is done because after the jump
 				-- instruction is executed, the instruction counter will be increased
@@ -134,28 +142,28 @@ npc.proc.register_program = function(name, raw_instruction_list)
 				for _,instr in ipairs(instruction.args.loop_instructions) do
 					instruction_list[#instruction_list + 1] = instr
 				end
-				
+
 				-- Insert conditional to loop back if expr is true
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:jump_if", 
+					name = "npc:jump_if",
 					args = {
-						expr = instruction.args.expr, 
-						pos = loop_start, 
+						expr = instruction.args.expr,
+						pos = loop_start,
 						negate = false
 					}
 				}
-				
+
 			elseif instruction.name == "npc:for" then
-			
+
 				-- Initialize loop variable
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_index", 
+						key = "for_index",
 						value = instruction.args.initial_value
 					}
 				}
-			
+
 				-- The below will actually set the jump to the instruction previous
 				-- to the relevant one - this is done because after the jump
 				-- instruction is executed, the instruction counter will be increased
@@ -164,52 +172,50 @@ npc.proc.register_program = function(name, raw_instruction_list)
 				for _,instr in ipairs(instruction.args.loop_instructions) do
 					instruction_list[#instruction_list + 1] = instr
 				end
-				
+
 				-- Insert loop variable increase instruction
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_index", 
+						key = "for_index",
 						value = function(self, args)
-							return self.data.proc[self.process.current.id]["for_index"] 
+							return self.data.proc[self.process.current.id]["for_index"]
 								+ instruction.args.step_increase
 						end
 					}
 				}
-				
+
 				-- Insert conditional to loop back if expr is true
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:jump_if", 
+					name = "npc:jump_if",
 					args = {
 						expr = instruction.args.expr,
-						pos = loop_start, 
+						pos = loop_start,
 						negate = false
 					}
 				}
-				
+
 			elseif instruction.name == "npc:for_each" then
-			
+
 				--assert(type(instruction.args.array) == "table")
-			
+
 				-- Initialize loop variables
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_index", 
+						key = "for_index",
 						value = 1
 					}
 				}
-				
+
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_value", 
-						value = function(self, args)
-						
-						end
+						key = "for_value",
+						value = instruction.args.array..".1"
 					}
 				}
-			
+
 				-- The below will actually set the jump to the instruction previous
 				-- to the relevant one - this is done because after the jump
 				-- instruction is executed, the instruction counter will be increased
@@ -218,44 +224,44 @@ npc.proc.register_program = function(name, raw_instruction_list)
 				for _,instr in ipairs(instruction.args.loop_instructions) do
 					instruction_list[#instruction_list + 1] = instr
 				end
-				
+
 				-- Insert loop variable increase instruction
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_index", 
+						key = "for_index",
 						value = function(self, args)
 							return self.data.proc[self.process.current.id]["for_index"] + 1
 						end
 					}
 				}
-				
+
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:var:set", 
+					name = "npc:var:set",
 					args = {
-						key = "for_value", 
+						key = "for_value",
 						value = function(self, args)
-							return instruction.args.array[self.data.proc[self.process.current.id].for_index]
+							return instruction.args.array.."."..self.data.proc[self.process.current.id].for_index
 						end
 					}
 				}
-				
+
 				-- Insert conditional to loop back if expr is true
 				instruction_list[#instruction_list + 1] = {
-					name = "npc:jump_if", 
+					name = "npc:jump_if",
 					args = {
 						expr = instruction.args.expr,
-						pos = loop_start, 
+						pos = loop_start,
 						negate = false
 					}
 				}
-				
+
 			else
 				-- Insert the instruction
 				instruction_list[#instruction_list + 1] = instruction
 			end
 		end
-	
+
 		program_table[name] = instruction_list
 		minetest.log(dump(program_table))
 		return true
@@ -320,9 +326,9 @@ npc.proc.execute_program = function(self, name, args)
 		args = args,
 		instruction = 1
 	}
-	
+
 	self.process.current.key = (self.process.current.key + 1) % 100
-	
+
 	self.process.current = self.process.queue[#self.process.queue]
 end
 
@@ -334,11 +340,14 @@ _npc.proc.execute_instruction = function(self, name, raw_args)
 			args[key] = _npc.dsl.evaluate_argument(self, value, raw_args)
 		end
 	end
-	
+
+	minetest.log("Instruction name: "..dump(name))
+	minetest.log("Instruction args: "..dump(args))
+
 	instruction_table[name](self, args)
-	if name == "npc:jump" 
-		or name == "npc:jump_if" 
-		or name == "npc:var:get" 
+	if name == "npc:jump"
+		or name == "npc:jump_if"
+		or name == "npc:var:get"
 		or name == "npc:var:set" then
 		-- Execute next instruction now if possible
 		self.process.current.instruction = self.process.current.instruction + 1
@@ -357,13 +366,13 @@ npc.proc.enqueue_process = function(self, name, args)
 		args = args,
 		instruction = 1
 	}
-	
+
 	self.process.current.key = (self.process.current.key + 1) % 100
-	
+
 	local next_tail = (self.process.queue_tail + 1) % 100
 	if next_tail == 0 then next_tail = 1 end
 	self.process.queue_tail = next_tail
-	
+
 	-- If current process is state process, execute the new process immediately
 	-- TODO: Check if this actually works
 	if self.process.current.name == self.process.state.name then
@@ -387,7 +396,7 @@ end
 npc.proc.register_program("sample:stupid", {
 	{name = "npc:for", args = {
 		initial_value = 0,
-		step_increase = 2, 
+		step_increase = 2,
 		expr = {left="@local.for_index", op="<=", right=6},
 		loop_instructions = {
 			{name = "builtin:walk_step", args = {dir = "@local.for_index"}}
@@ -412,7 +421,7 @@ npc.proc.register_program("builtin:idle", {
 							return vector.distance(object_pos, self_pos) < 4
 						end
 						return false
-					end, 
+					end,
 					true_instructions = {
 						{name = "npc:move:rotate", args={target_pos="@local.for_value"}}
 					}}
@@ -432,7 +441,7 @@ npc.proc.register_instruction("builtin:stand", function(self, args)
 end)
 
 npc.proc.register_instruction("builtin:walk_step", function(self, args)
-	
+
 	local speed = 1
 	local vel = {}
 	local dir = args.dir
@@ -454,8 +463,8 @@ npc.proc.register_instruction("builtin:walk_step", function(self, args)
     elseif dir == 7 then
         vel = {x=-speed, y=0, z=speed }
     end
-    
-    
+
+
 	local yaw = minetest.dir_to_yaw(vector.direction(self.object:get_pos(), vector.add(self.object:get_pos(), vel)))
 	self.object:set_yaw(yaw)
 	self.object:set_velocity(vel)
@@ -479,7 +488,7 @@ npc.proc.register_program("builtin:walk_example", {
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 local do_step = function(self, dtime)
-	
+
 	self.timers.node_below_value = self.timers.node_below_value + dtime
 	self.timers.objects_value = self.timers.objects_value + dtime
 	self.timers.proc_value = self.timers.proc_value + dtime
@@ -488,20 +497,20 @@ local do_step = function(self, dtime)
 		local current_pos = self.object:get_pos()
 		self.data.env.node_on = minetest.get_node_or_nil({x=current_pos.x, y=current_pos.y-1, z=current_pos.z})
 	end
-	
+
 	-- Get objects around NPC on radius
 	if (self.timers.objects_value > self.timers.objects_int) then
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
-	
+
 	-- Process queue
 	if (self.timers.proc_value > self.timers.proc_int) then
 		self.timers.proc_value = 0
 		--minetest.log("Process: "..dump(self.process))
-	
+
 		-- Check if there is a current process
 		if self.process.current.name ~= nil then
-			
+
 			-- Check if there is a next instruction
 			if self.process.current.instruction > #program_table[self.process.current.name] then
 				-- If process is state process, reset instruction counter
@@ -535,7 +544,7 @@ local do_step = function(self, dtime)
 			-- Check if there is a process in queue
 			if self.process.queue_tail - self.process.queue_head ~= 0 then
 				self.process.current = self.process.queue[self.process.queue_head]
-		
+
 			-- Check if there is a state process
 			elseif self.process.state.name ~= nil then
 				self.process.current.id = self.process.state.id
@@ -544,10 +553,10 @@ local do_step = function(self, dtime)
 				self.process.current.instruction = 1
 			end
 		end
-	
+
 		-- Execute next instruction, if available
 		if self.process.current.instruction > -1 then
-			local instruction = 
+			local instruction =
 				program_table[self.process.current.name][self.process.current.instruction]
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args)
 			self.process.current.instruction = self.process.current.instruction + 1
@@ -576,7 +585,7 @@ minetest.register_entity("anpc:npc", {
 			self["process"] = minetest.deserialize(cols[2])
 			self["data"] = minetest.deserialize(cols[3])
 		else
-			
+
 			self.timers = {
 				node_below_value = 0,
 				node_below_int = 0.5,
@@ -585,7 +594,7 @@ minetest.register_entity("anpc:npc", {
 				proc_value = 0,
 				proc_int = 0.5
 			}
-			
+
 			self.process = {
 				key = 0,
 				current = {
@@ -603,43 +612,43 @@ minetest.register_entity("anpc:npc", {
 				queue_tail = 1,
 				queue = {}
 			}
-			
+
 			self.data = {
 				env = {},
 				global = {},
 				proc = {}
 			}
-			
+
 			self.data.env.view_range = 12
-			
+
 			self.schedule = {}
-			
+
 			self.state = {
 				walk = {
 					target_pos = {}
 				}
 			}
 		end
-		
+
 	end,
 	get_staticdata = function(self)
-	
+
 		local result = ""
 		if self.timers then
 			result = result..minetest.serialize(self.timers).."|"
 		end
-		
+
 		if self.process then
 			result = result..minetest.serialize(self.process).."|"
 		end
-		
+
 		if self.data then
 			self.data.env.objects = nil
 			result = result..minetest.serialize(self.data).."|"
 		end
-		
+
 		return result
-	
+
 	end,
 	on_step = do_step,
 	on_punch = function(self, puncher, time_from_last_punch, tool_capabilities, dir)
