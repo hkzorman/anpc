@@ -77,6 +77,8 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 			else
 				return result
 			end
+			--minetest.log("Expression: "..dump(expression_values))
+
 		end
 	elseif type(expr) == "table" and expr.left and expr.op then
 		return _npc.dsl.evaluate_boolean_expression(self, expr, args)
@@ -695,9 +697,9 @@ npc.proc.execute_program = function(self, name, args)
 		args = args,
 		instruction = program_table[name].initial_instruction
 	}
-	
+
 	self.process.current.key = (self.process.current.key + 1) % 100
-	
+
 	self.process.current = self.process.queue[#self.process.queue]
 end
 
@@ -709,7 +711,6 @@ _npc.proc.execute_instruction = function(self, name, raw_args)
 			args[key] = _npc.dsl.evaluate_argument(self, value, raw_args)
 		end
 	end
-	
 	minetest.log("Executing instruction: ["..dump(self.process.current.instruction).."] "..dump(name))
 	
 --	if name == "npc:end" then
@@ -744,13 +745,13 @@ npc.proc.enqueue_process = function(self, name, args)
 		args = args,
 		instruction = program_table[name].initial_instruction
 	}
-	
+
 	self.process.current.key = (self.process.current.key + 1) % 100
-	
+
 	local next_tail = (self.process.queue_tail + 1) % 100
 	if next_tail == 0 then next_tail = 1 end
 	self.process.queue_tail = next_tail
-	
+
 	-- If current process is state process, execute the new process immediately
 	-- TODO: Check if this actually works
 	if self.process.current.name == self.process.state.name then
@@ -774,7 +775,7 @@ end
 npc.proc.register_program("sample:stupid", {
 	{name = "npc:for", args = {
 		initial_value = 0,
-		step_increase = 2, 
+		step_increase = 2,
 		expr = {left="@local.for_index", op="<=", right=6},
 		loop_instructions = {
 			{name = "builtin:walk_step", args = {dir = "@local.for_index"}}
@@ -908,7 +909,7 @@ npc.proc.register_program("builtin:idle", {
 --})
 
 npc.proc.register_instruction("builtin:walk_step", function(self, args)
-	
+
 	local speed = 1
 	local vel = {}
 	local dir = args.dir
@@ -930,8 +931,8 @@ npc.proc.register_instruction("builtin:walk_step", function(self, args)
     elseif dir == 7 then
         vel = {x=-speed, y=0, z=speed }
     end
-    
-    
+
+
 	local yaw = minetest.dir_to_yaw(vector.direction(self.object:get_pos(), vector.add(self.object:get_pos(), vel)))
 	self.object:set_yaw(yaw)
 	self.object:set_velocity(vel)
@@ -947,7 +948,7 @@ end)
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 local do_step = function(self, dtime)
-	
+
 	self.timers.node_below_value = self.timers.node_below_value + dtime
 	self.timers.objects_value = self.timers.objects_value + dtime
 	self.timers.proc_value = self.timers.proc_value + dtime
@@ -956,12 +957,12 @@ local do_step = function(self, dtime)
 		local current_pos = self.object:get_pos()
 		self.data.env.node_on = minetest.get_node_or_nil({x=current_pos.x, y=current_pos.y-1, z=current_pos.z})
 	end
-	
+
 	-- Get objects around NPC on radius
 	if (self.timers.objects_value > self.timers.objects_int) then
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
-	
+
 	-- Process queue
 	if (self.timers.proc_value > self.timers.proc_int) then
 		self.timers.proc_value = 0
@@ -999,10 +1000,10 @@ local do_step = function(self, dtime)
 			end
 		end
 		--minetest.log("Process: "..dump(self.process))
-	
+
 		-- Check if there is a current process
 		if self.process.current.name ~= nil then
-			
+
 			-- Check if there is a next instruction
 			if self.process.current.instruction > #program_table[self.process.current.name].instructions then
 				-- If process is state process, reset instruction counter
@@ -1038,7 +1039,7 @@ local do_step = function(self, dtime)
 			-- Check if there is a process in queue
 			if self.process.queue_tail - self.process.queue_head ~= 0 then
 				self.process.current = self.process.queue[self.process.queue_head]
-		
+
 			-- Check if there is a state process
 			elseif self.process.state.name ~= nil then
 				self.process.current.id = self.process.state.id
@@ -1048,7 +1049,7 @@ local do_step = function(self, dtime)
 					program_table[self.process.current.name].initial_instruction
 			end
 		end
-	
+
 		-- Execute next instruction, if available
 		if self.process.current.instruction > -1 then
 			local instruction = 
@@ -1082,7 +1083,7 @@ minetest.register_entity("anpc:npc", {
 			self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 			minetest.log("Data: "..dump(self))
 		else
-			
+
 			self.timers = {
 				node_below_value = 0,
 				node_below_int = 0.5,
@@ -1091,7 +1092,7 @@ minetest.register_entity("anpc:npc", {
 				proc_value = 0,
 				proc_int = 0.5
 			}
-			
+
 			self.process = {
 				key = 0,
 				current = {
@@ -1109,18 +1110,18 @@ minetest.register_entity("anpc:npc", {
 				queue_tail = 1,
 				queue = {}
 			}
-			
+
 			self.data = {
 				env = {},
 				global = {},
 				proc = {},
 				temp = {}
 			}
-			
+
 			self.data.env.view_range = 12
-			
+
 			self.schedule = {}
-			
+
 			self.state = {
 				walk = {
 					target_pos = {}
@@ -1130,28 +1131,28 @@ minetest.register_entity("anpc:npc", {
 				}
 			}
 		end
-		
+
 	end,
 	get_staticdata = function(self)
-	
+
 		local result = ""
 		if self.timers then
 			result = result..minetest.serialize(self.timers).."|"
 		end
-		
+
 		if self.process then
 			result = result..minetest.serialize(self.process).."|"
 		end
-		
+
 		if self.data then
 			self.data.env.objects = {}
 			self.data.temp = {}
 			minetest.log("User data: "..dump(self.data))
 			result = result..minetest.serialize(self.data).."|"
 		end
-		
+
 		return result
-	
+
 	end,
 	on_step = do_step,
 	on_punch = function(self, puncher, time_from_last_punch, tool_capabilities, dir)
