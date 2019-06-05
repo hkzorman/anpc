@@ -30,9 +30,7 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
 	
-	minetest.log("Boolean expression: "..dump(expr))
-	--minetest.log("Source: "..dump(source))
-	--minetest.log("Target: "..dump(target))
+	--minetest.log("Boolean expression: "..dump(expr))
 	
 	if operator == "==" then
 		return source == target
@@ -203,44 +201,60 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	
 	if instruction.name == "npc:if" then	
 		---minetest.log("The greatest jump if: "..dump(instruction))
-		-- Insert jump to skip true instructions if expr is false
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if", 
-			args = {
-				expr = instruction.args.expr,
-				pos = original_list_size + #instruction.args.true_instructions + 1, 
-				negate = true
-			}
-		}
 		
-		-- Insert all true_instructions
+		-- Process true instructions if available
+		local true_instrs = {}
 		for i = 1, #instruction.args.true_instructions do
 			assert(not instruction.args.true_instructions[i].declare, 
 				"Function declaration cannot be done inside another instruction.")
 			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i], #instruction_list + original_list_size)
 			for j = 1, #instrs do
-				instruction_list[#instruction_list + 1] = instrs[j]
+				true_instrs[#true_instrs + 1] = instrs[j]
 			end
 		end
 		
-		-- Insert jump to skip false instructions if expr is true
-		if instruction.args.false_instructions then
-			instruction_list[#instruction_list + 1] = {
-				name = "npc:jump", 
-				args = {
-					pos = #instruction_list + original_list_size + #instruction.args.false_instructions + 1, 
-				}
+		-- Insert jump to skip true instructions if expr is false
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:jump_if", 
+			args = {
+				expr = instruction.args.expr,
+				pos = original_list_size + #true_instrs + 1, 
+				negate = true
 			}
-			
-			-- Insert all false_instructions
+		}
+		
+		-- Insert all true_instructions into result
+		for j = 1, #true_instrs do
+			instruction_list[#instruction_list + 1] = true_instrs[j]
+		end
+		
+		-- False instructions
+		if instruction.args.false_instructions then
+		
+			-- Process false instructions if available
+			local false_instrs = {}
 			for i = 1, #instruction.args.false_instructions do
 				assert(not instruction.args.false_instructions[i].declare, 
 					"Function declaration cannot be done inside another instruction.")	
 				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i], #instruction_list + original_list_size)
 				for j = 1, #instrs do
-					instruction_list[#instruction_list + 1] = instrs[j]
+					false_instrs[#false_instrs + 1] = instrs[j]
 				end
 			end
+			
+			-- Insert jump to skip false instructions if expr is true
+			instruction_list[#instruction_list + 1] = {
+				name = "npc:jump", 
+				args = {
+					pos = #instruction_list + original_list_size + #false_instrs + 1, 
+				}
+			}
+			
+			-- Insert all false_instructions
+			for j = 1, #false_instrs do
+				instruction_list[#instruction_list + 1] = false_instrs[j]
+			end
+			
 		end
 		
 	elseif instruction.name == "npc:while" then
