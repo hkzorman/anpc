@@ -7,6 +7,9 @@ local _npc = {
 	proc = {}
 }
 
+local path = minetest.get_modpath("anpc")
+dofile(path .. "/pathfinder.lua")
+
 npc.ANIMATION_STAND_START = 0
 npc.ANIMATION_STAND_END = 79
 npc.ANIMATION_SIT_START = 81
@@ -30,7 +33,7 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
 	
-	--minetest.log("Boolean expression: "..dump(expr))
+	minetest.log("Boolean expression: "..dump(expr))
 	
 	if operator == "==" then
 		return source == target
@@ -39,7 +42,7 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	elseif operator == "<=" then
 		return source <= target
 	elseif operator == "~=" then
-		minetest.log("Bool expression eval: "..dump(source ~= target))
+		--minetest.log("Bool expression eval: "..dump(source ~= target))
 		return source ~= target
 	elseif operator == "<" then
 		return source < target
@@ -184,8 +187,8 @@ _npc.dsl.get_var = function(self, key)
 			result = nil
 		end
 	end
-	minetest.log("Actual: "..dump(self.data.proc[self.process.current.id][key]))
-	minetest.log("Returning: "..dump(result))
+	--minetest.log("Actual: "..dump(self.data.proc[self.process.current.id][key]))
+	--minetest.log("Returning: "..dump(result))
 	return result
 end
 
@@ -195,9 +198,12 @@ end
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 -- Returns an array of instructions
-_npc.proc.process_instruction = function(instruction, original_list_size, function_index_map)
+_npc.proc.process_instruction = function(instruction, original_list_size, function_index_map, nesting_level)
 	local instruction_list = {}
 	local is_function = false
+	
+	minetest.log("Current list size: "..dump(original_list_size))
+	minetest.log("Processing instruction: "..dump(instruction))
 	
 	if instruction.name == "npc:if" then	
 		---minetest.log("The greatest jump if: "..dump(instruction))
@@ -207,19 +213,30 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		for i = 1, #instruction.args.true_instructions do
 			assert(not instruction.args.true_instructions[i].declare, 
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i], #instruction_list + original_list_size)
+			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i], 
+				#true_instrs + original_list_size + 1, {}, nesting_level + 1)
+			minetest.log("Processing inner instruction: "..dump(instruction.args.true_instructions[i]))
+			minetest.log("Yielded "..dump(#instrs).." instructions")
 			for j = 1, #instrs do
 				true_instrs[#true_instrs + 1] = instrs[j]
 			end
 		end
 		
+		--original_list_size = original_list_size + 1
+		
+		minetest.log("Original list: "..dump(original_list_size))
+		minetest.log("#true instr: "..dump(#true_instrs))
+		
 		-- Insert jump to skip true instructions if expr is false
+		local offset = 1
+		if nesting_level > 1 then offset = 0 end
 		instruction_list[#instruction_list + 1] = {
 			name = "npc:jump_if", 
 			args = {
 				expr = instruction.args.expr,
-				pos = original_list_size + #true_instrs + 1, 
-				negate = true
+				pos =  #true_instrs + offset + nesting_level, 
+				negate = true,
+				offset = true
 			}
 		}
 		
@@ -235,18 +252,25 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			local false_instrs = {}
 			for i = 1, #instruction.args.false_instructions do
 				assert(not instruction.args.false_instructions[i].declare, 
-					"Function declaration cannot be done inside another instruction.")	
-				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i], #instruction_list + original_list_size)
+					"Function declaration cannot be done inside another instruction.")
+				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i], 
+					#false_instrs + #instruction_list + original_list_size + 1, {}, nesting_level + 1)
 				for j = 1, #instrs do
 					false_instrs[#false_instrs + 1] = instrs[j]
 				end
 			end
 			
+			minetest.log("Components: instr_list: "..dump(#instruction_list)..", false: "..dump(#false_instrs)..", org: "..dump(original_list_size))
+			
+			offset = 1
+			if nesting_level < 2 then offset = 0 end
+			
 			-- Insert jump to skip false instructions if expr is true
 			instruction_list[#instruction_list + 1] = {
 				name = "npc:jump", 
 				args = {
-					pos = #instruction_list + original_list_size + #false_instrs + 1, 
+					pos = #false_instrs + nesting_level + offset,
+					offset = true 
 				}
 			}
 			
@@ -281,7 +305,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		for i = 1, #instruction.args.loop_instructions do
 			assert(not instruction.args.loop_instructions[i].declare, 
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], loop_start)
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+				loop_start, {}, nesting_level + 1)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
@@ -322,7 +347,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		for i = 1, #instruction.args.loop_instructions do
 			assert(not instruction.args.loop_instructions[i].declare, 
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], loop_start)
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+				loop_start, {}, nesting_level + 1)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
@@ -384,7 +410,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		for i = 1, #instruction.args.loop_instructions do
 			assert(not instruction.args.loop_instructions[i].declare, 
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], loop_start)
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+				loop_start, {}, nesting_level + 1)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
@@ -452,7 +479,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	
 		-- Process all instructions
 		for i = 1, #instruction.instructions do
-			local instrs = _npc.proc.process_instruction(instruction.instructions[i], func_index)
+			local instrs = _npc.proc.process_instruction(instruction.instructions[i], 
+				func_index, {}, nesting_level + 1)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
@@ -483,7 +511,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		local all_instructions, timer_func_index = _npc.proc.process_instruction({
 			declare = timer_name, 
 			instructions = instruction.args.instructions
-		}, original_list_size, function_index_map)
+		}, original_list_size, function_index_map, nesting_level + 1)
 		
 		-- Add all instructions
 		for i = 1, #all_instructions do
@@ -532,7 +560,10 @@ npc.proc.register_program = function(name, raw_instruction_list)
 			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop", 
 				"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
 			
-			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i], #instruction_list + 1, function_table)
+			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i], 
+				#instruction_list + 1, function_table, 0)
+			minetest.log("Raw instruction name: "..dump(raw_instruction_list[i].name))
+			minetest.log("Yielded "..dump(#instructions).." instructions")
 			for j = 1, #instructions do
 				instruction_list[#instruction_list + 1] = instructions[j]
 			end
@@ -550,7 +581,13 @@ npc.proc.register_program = function(name, raw_instruction_list)
 			initial_instruction = initial_instruction,
 			instructions = instruction_list
 		}
-		minetest.log(dump(program_table))
+		
+		minetest.log("Registered and compiled program '"..dump(name).."':")
+		for i = 1, #instruction_list do
+			minetest.log("["..dump(i).."] = "..dump(instruction_list[i]))
+		end
+		
+		--minetest.log(dump(program_table))
 		return true
 	end
 end
@@ -577,13 +614,14 @@ npc.proc.register_instruction("npc:var:set", function(self, args)
 end)
 
 -- Control instructions
---npc.proc.register_instruction("npc:if", function(self, args) end)
---npc.proc.register_instruction("npc:while", function(self, args) end)
---npc.proc.register_instruction("npc:for", function(self, args) end)
---npc.proc.register_instruction("npc:for_each", function(self, args) end)
-
 npc.proc.register_instruction("npc:jump", function(self, args)
-	self.process.current.instruction = args.pos
+	if args.offset == true then
+		self.process.current.instruction = self.process.current.instruction + args.pos
+	else
+		self.process.current.instruction = args.pos
+	end
+	
+	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
 end)
 
 npc.proc.register_instruction("npc:jump_if", function(self, args)
@@ -592,14 +630,22 @@ npc.proc.register_instruction("npc:jump_if", function(self, args)
 	minetest.log("Jump-If: Expression: "..dump(args.expr))
 	minetest.log("Jump-If: Condition: "..dump(condition))
 	if condition == true then
-		self.process.current.instruction = args.pos
-		--minetest.log("Next instruction set to: "..dump(self.process.current.instruction))
+		if args.offset == true then
+			self.process.current.instruction = self.process.current.instruction + args.pos
+		else
+			self.process.current.instruction = args.pos
+		end
+	
+		minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
 	end
+
 end)
 
 npc.proc.register_instruction("npc:break", function(self, args)
 	for i = self.process.current.instruction + 1, #program_table[self.process.current.name].instructions do
 		if program_table[self.process.current.name].instructions[i].loop_end then
+			minetest.log("Found last instruction of loop to be: "..dump(program_table[self.process.current.name].instructions[i]))
+			minetest.log("At pos: "..dump(i))
 			self.process.current.instruction = i
 			break
 		end
@@ -684,6 +730,43 @@ npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
 	self.timers.instr_timer = nil
 end)
 
+-- TODO: Finish implementation
+-- This instruction prioritizes a certain object in the self.data.env.objects
+-- array depending on the given criteria. The prioritized item will be swapped
+-- with the first item in the array.
+npc.proc.register_instruction("npc:env:prioritize", function(self, args)
+
+	if (#self.data.env.objects < 1) then return end
+
+	local distance = args.distance 		 -- Supported values: "min", "max", an integer number
+	local entity_type = args.entity_type -- Supported values: "player", "npc", "monster"
+	
+	local self_pos = self.object:get_pos()
+	local min_dist = vector.distance(self_pos, self.data.env.objects[1]:get_pos())
+	local max_dist = vector.distance(self_pos, self.data.env.objects[1]:get_pos())
+	
+	for i = 1, #self.data.env.objects do
+		if self.data.env.objects[i]
+			and self.data.env.objects[i]:get_luaentity() then
+			local pos = self.data.env.objects[i]:get_pos()
+			local is_player = self.data.env.objects[i]:is_player()
+			local distance = vector.distance(self_pos, pos)
+			
+			if (type(distance) == "string") then
+				if distance == "min" then
+					if distance < min_dist then
+					
+					end
+				elseif (distance == "max") then
+					
+				end
+			elseif (type(distance) == "number") then
+				
+			end
+		end
+	end
+end)
+
 -- Movement instructions
 npc.proc.register_instruction("npc:move:rotate", function(self, args)
 	local dir = vector.direction(self.object:get_pos(), args.target_pos)
@@ -699,6 +782,91 @@ npc.proc.register_instruction("npc:move:stand", function(self, args)
         30, 0)
 end)
 
+--TODO: Add calculation for surrounding air nodes if node is walkable
+npc.proc.register_instruction("npc:move:find_path", function(self, args)
+
+	local end_pos = args.end_pos
+	local start_pos = args.start_pos or vector.round(self.object:get_pos())
+	
+	if npc.pathfinder.is_good_node(minetest.get_node(args.end_pos), {}) == npc.pathfinder.node_types.non_walkable then
+		
+		local count = 0
+		while count < 4 do
+			local pos = end_pos
+			if count == 0 then
+				pos.x = pos.x + 1
+			elseif count == 1 then
+				pos.z = pos.z + 1
+			elseif count == 2 then
+				pos.x = pos.x -1
+			elseif count == 3 then
+				pos.z = pos.z -1
+			end
+			
+			local node = minetest.get_node(pos)
+			if node and node.name == "air" then 
+				end_pos = pos
+				break 
+			end
+			count = count + 1
+		end
+		
+	end 
+	
+	minetest.log("Start pos: "..dump(start_pos))
+	
+	local path = npc.pathfinder.find_path(start_pos, end_pos, self, args.decorate)
+	minetest.log("Path found: "..dump(path))
+	self.data.proc[self.process.current.id].current_path = path
+
+end)
+
+-- This instruction sets the NPC in motion towards a specific direction at
+-- a specific speed. Notice that this instruction *doesn't* provides 
+-- pathfinding. Also, notice this doesn't stops the NPC once in motion.
+-- The stop has to be done separately by using the instruction `npc:move:stand`.
+-- There are two different ways to use it:
+--   1. If a `target_pos` is provided, the NPC will rotate to that position
+--      and will walk towards it.
+--   2. If a `yaw` is provided, the NPC will rotate according to the yaw
+--      and walk
+-- TODO: Allow random yaw to be generated by instruction
+
+npc.proc.register_instruction("npc:move:walk", function(self, args)
+--	if (args.cardinal_dir) then
+--		if dir == 0 then
+--        	vel = {x=0, y=0, z=speed}
+--		elseif dir == 1 then
+--		    vel = {x=speed, y=0, z=speed}
+--		elseif dir == 2 then
+--		    vel = {x=speed, y=0, z=0}
+--		elseif dir == 3 then
+--		    vel = {x=speed, y=0, z=-speed}
+--		elseif dir == 4 then
+--		    vel = {x=0, y=0, z=-speed}
+--		elseif dir == 5 then
+--		    vel = {x=-speed, y=0, z=-speed}
+--		elseif dir == 6 then
+--		    vel = {x=-speed, y=0, z=0}
+--		elseif dir == 7 then
+--		    vel = {x=-speed, y=0, z=speed }
+--		end
+--	end
+
+	local dir = vector.direction(self.object:get_pos(), args.target_pos or {x=0,y=0,z=0})
+	local yaw = args.yaw or minetest.dir_to_yaw(dir)
+	local speed = args.speed or 1
+	
+	self.object:set_yaw(yaw)
+	minetest.log("This is unit vector: "..dump({x=(dir.x/dir.x), y=0, z=(dir.z/dir.z)}))
+	minetest.log("This is the dir: "..dump(dir))
+	self.object:set_velocity(vector.multiply({x=(dir.x/math.abs(dir.x)), y=0, z=(dir.z/math.abs(dir.z))}, speed))
+	self.object:set_animation({
+        x = npc.ANIMATION_WALK_START,
+        y = npc.ANIMATION_WALK_END},
+        30, 0)
+end)
+
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 -- Process API
@@ -707,12 +875,13 @@ end)
 npc.proc.execute_program = function(self, name, args)
 	-- Enqueue process
 	self.process.queue[#self.process.queue + 1] = {
+		id = self.process.key,
 		name = name,
 		args = args,
 		instruction = program_table[name].initial_instruction
 	}
 
-	self.process.current.key = (self.process.current.key + 1) % 100
+	self.process.key = (self.process.key + 1) % 100
 
 	self.process.current = self.process.queue[#self.process.queue]
 end
@@ -727,12 +896,6 @@ _npc.proc.execute_instruction = function(self, name, raw_args)
 	end
 	minetest.log("Executing instruction: ["..dump(self.process.current.instruction).."] "..dump(name))
 	
---	if name == "npc:end" then
---		 Set instruction pointer to last
---		self.process.current.instruction = #program_table[self.process.current.name]
---		return
---	end
-	
 	instruction_table[name](self, args)
 	
 	if name == "npc:jump" 
@@ -742,8 +905,14 @@ _npc.proc.execute_instruction = function(self, name, raw_args)
 		or name == "npc:var:set"
 		or name == "npc:timer:instr:start"
 		or name == "npc:timer:instr:stop" then
+		
 		-- Execute next instruction now if possible
-		self.process.current.instruction = self.process.current.instruction + 1
+		if name ~= "npc:jump" and name ~= "npc:jump_if" and name ~= "npc:break" then 
+			-- The above instructions set the instruction counter, making it unnecessary
+			-- to increase it.
+			self.process.current.instruction = self.process.current.instruction + 1
+		end
+		
 		local instruction = program_table[self.process.current.name].instructions[self.process.current.instruction]
 		if instruction then
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args)
@@ -760,7 +929,7 @@ npc.proc.enqueue_process = function(self, name, args)
 		instruction = program_table[name].initial_instruction
 	}
 
-	self.process.current.key = (self.process.current.key + 1) % 100
+	self.process.key = (self.process.key + 1) % 100
 
 	local next_tail = (self.process.queue_tail + 1) % 100
 	if next_tail == 0 then next_tail = 1 end
@@ -792,7 +961,7 @@ npc.proc.register_program("sample:stupid", {
 		step_increase = 2,
 		expr = {left="@local.for_index", op="<=", right=6},
 		loop_instructions = {
-			{name = "builtin:walk_step", args = {dir = "@local.for_index"}}
+			{name = "npc:move:walk", args = {dir = "@local.for_index"}}
 		}
 	}}
 })
@@ -814,6 +983,7 @@ npc.proc.register_program("builtin:idle", {
 				expr = function(self, args)
 					-- Random 50% chance
 					local chance = math.random(1, 100)
+					minetest.log("")
 					if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then 
 						return false 
 					end
@@ -922,6 +1092,54 @@ npc.proc.register_program("builtin:idle", {
 --	}}
 --})
 
+npc.proc.register_program("builtin:walk_to_pos", {
+	{name = "npc:var:set", args = {
+		key = "has_reached_pos",
+		value = false
+	}},
+	{name = "npc:while", args = {
+		expr = {
+			left = "@local.has_reached_pos",
+			op   = "~=",
+			right = true
+		},
+		loop_instructions = {
+			{name = "npc:move:find_path", args = {
+				end_pos = "@args.end_pos"
+			}},
+			{name = "npc:if", args = {
+				expr = {
+					left = "@local.current_path",
+					op   = "~=",
+					right = nil
+				},
+				true_instructions = {
+					{name = "npc:if", args = {
+						expr = function(self, args)
+							minetest.log("Data: "..dump(self.data))
+							minetest.log("# path: "..dump(#self.data.proc[self.process.current.id].current_path))
+							return #self.data.proc[self.process.current.id].current_path < 1
+						end,
+						true_instructions = {
+							{name = "npc:break"}
+						},
+						false_instructions = {
+							{name = "npc:move:walk", args = {
+								target_pos = "@local.current_path.1"
+							}}
+						}
+					}}	
+				},
+				false_instructions = {
+					
+					{name = "npc:break"}
+				}
+			}}
+		}
+	}}
+
+})
+
 npc.proc.register_instruction("builtin:walk_step", function(self, args)
 
 	local speed = 1
@@ -1029,12 +1247,15 @@ local do_step = function(self, dtime)
 					local next_head = (self.process.queue_head + 1) % 100
 					if next_head == 0 then next_head = 1 end
 					self.process.queue[self.process.queue_head] = nil
-					self.process.queue_head = next_head
 					self.process.current.name = nil
 					self.process.current.instruction = -1
+					-- Check if there's a next process
+					if self.process.queue[next_head] ~= nil then
+						self.process.queue_head = next_head
+					end
 				end
 				-- Check if no more processes in queue
-				if self.process.queue_tail - self.process.queue_head == 0 then
+				if (self.process.queue_tail - self.process.queue_head) == 0 then
 					-- Execute state process, if present
 					if self.process.state.name ~= nil then
 						self.process.current.id = self.process.state.id
@@ -1063,6 +1284,8 @@ local do_step = function(self, dtime)
 					program_table[self.process.current.name].initial_instruction
 			end
 		end
+		
+		--minetest.log("Process now: "..dump(process))
 
 		-- Execute next instruction, if available
 		if self.process.current.instruction > -1 then
@@ -1078,7 +1301,7 @@ end
 minetest.register_entity("anpc:npc", {
 	hp_max = 1,
 	visual = "mesh",
-	mesh = "character.b3d",
+	mesh = "character_anpc.b3d",
 	textures = {
 		"default_male.png",
 	},
@@ -1095,7 +1318,7 @@ minetest.register_entity("anpc:npc", {
 			self["data"] = minetest.deserialize(cols[3])
 			-- Restore objects
 			self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
-			minetest.log("Data: "..dump(self))
+			--minetest.log("Data: "..dump(self))
 		else
 
 			self.timers = {
@@ -1161,7 +1384,7 @@ minetest.register_entity("anpc:npc", {
 		if self.data then
 			self.data.env.objects = {}
 			self.data.temp = {}
-			minetest.log("User data: "..dump(self.data))
+			--minetest.log("User data: "..dump(self.data))
 			result = result..minetest.serialize(self.data).."|"
 		end
 
@@ -1179,12 +1402,12 @@ minetest.register_craftitem("anpc:npc_spawner", {
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		local spawn_pos = minetest.pointed_thing_to_face_pos(user, pointed_thing)
-		spawn_pos.y = spawn_pos.y + 1
+		spawn_pos.y = spawn_pos.y
 		local entity = minetest.add_entity(spawn_pos, "anpc:npc")
 		if entity then
 			npc.proc.set_state_process(entity:get_luaentity(), "builtin:idle", {
 				ack_nearby_objs = true,
-				ack_nearby_objs_dist = 3,
+				ack_nearby_objs_dist = 4,
 				ack_nearby_objs_chance = 50
 			})
 		else
@@ -1198,7 +1421,8 @@ minetest.register_craftitem("anpc:npc_walker", {
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		if pointed_thing.type == "object" then
-			npc.proc.enqueue_process(pointed_thing.ref:get_luaentity(), "sample:stupid", {})
+			local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:dry_shrub"})
+			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "builtin:walk_to_pos", {end_pos = target_pos})
 		end
 	end
 })
