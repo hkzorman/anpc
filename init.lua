@@ -1,11 +1,12 @@
 npc = {
-	proc = {}
+	proc = {},
+	env  = {}
 }
 
 local _npc = {
-	dsl = {},
+	dsl  = {},
 	proc = {},
-	env = {},
+	env  = {},
 	move = {}
 }
 
@@ -77,11 +78,21 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 			elseif storage_type == "@env" then
 				result = self.data.env[expression_values[2]]
 			elseif storage_type == "@random" then
-				return math.random(expression_values[2], expression_values[3])
+				return math.random(tonumber(expression_values[2]), tonumber(expression_values[3]))
 			end
 			if #expression_values > 2 then
 				--minetest.log("Returning: "..dump(result[tonumber(expression_values[3])]))
-				return result[tonumber(expression_values[3])]
+				local index
+				local start_i, _ = string.find(expression_values[3], "@")
+				if start_i == 1 then
+					index = _npc.dsl.evaluate_argument(self, expression_values[3], args)
+				else
+					index = tonumber(expression_values[3])
+				end
+				minetest.log("Expr valu 3: "..dump(expression_values[3]))
+				minetest.log("Index: "..dump(index))
+				minetest.log("Result[idx]: "..dump(result[index]))
+				return result[index]
 			else
 				return result
 			end
@@ -199,6 +210,10 @@ _npc.dsl.get_var = function(self, key)
 	return result
 end
 
+--------------------------------------------------------------------
+-- Environment API
+--------------------------------------------------------------------
+
 _npc.env.node_operate = function(self, args)
 	local node_pos = args.pos
 	local node = minetest.get_node_or_nil(node_pos)
@@ -297,7 +312,7 @@ end
 _npc.env.node_npc_is_owner = function(self, args)
 	local meta = minetest.get_meta(args.pos)
 	local owner = meta:get_string("anpc:owner")
-	if owner == self.npc_id then
+	if owner == self.id then
 		return true
 	elseif owner ~= "" then
 		return false
@@ -309,7 +324,7 @@ end
 _npc.env.node_npc_is_user = function(self, args)
 	local meta = minetest.get_meta(args.pos)
 	local user = meta:get_string("anpc:user")
-	if user == self.npc_id then
+	if user == self.id then
 		return true
 	elseif user ~= "" then
 		return false
@@ -323,7 +338,7 @@ _npc.env.node_set_owned = function(self, args)
 	if (meta) then
 		local owner = meta:get_string("anpc:owner")
 		minetest.log("Owner: "..dump(owner))
-		if (owner == self.npc_id) then
+		if (owner == self.id) then
 			if (args.value == true) then
 				return true
 			else
@@ -335,7 +350,8 @@ _npc.env.node_set_owned = function(self, args)
 			-- Unable to change ownership as NPC is not the owner
 			return false
 		else
-			meta:set_string("anpc:owner", self.npc_id)
+			meta:set_string("anpc:owner", self.id)
+			meta:set_string("infotext", meta:get_string("infotext").." (owned by "..dump(self.id)..")")
 			return true
 		end
 	end
@@ -345,7 +361,7 @@ _npc.env.node_set_used = function(self, args)
 	local meta = minetest.get_meta(args.pos)
 	if (meta) then
 		local user = meta:get_string("anpc:user")
-		if (user == self.npc_id) then
+		if (user == self.id) then
 			if (args.value == true) then
 				return true
 			else
@@ -357,14 +373,34 @@ _npc.env.node_set_used = function(self, args)
 			-- Unable to change user as NPC is not the user
 			return false
 		else
-			meta:set_string("anpc:user", self.npc_id)
+			meta:set_string("anpc:user", self.id)
 			return true
 		end
 	end
 end
 
-_npc.env.node_store_add = function(self, args)
+-- The node storage is a two-level map structure. It is stored on self.data.env.nodes.
+-- In the first level, there are categories. The categories are groups of nodes, of
+-- similar functionality: e.g. `storage`, `beds`, `openable`
+-- In the second level, is the position hash got from `minetest.hash_node_position`.
+-- The value of the position hash is a boolean, which indicates if a node is primary
+-- or not.
+-- A primary node is an attribute used to prioritize node selection among a group of
+-- them.
 
+npc.env.categories = {
+	["openable"] = "openable",
+	["sittable"] = "sittable",
+	["layable"] = "layable",
+	["storage"] = "storage"
+}
+
+_npc.env.node_store_add = function(self, args)
+	if (not self.data.env.nodes) then self.data.env.nodes = {} end
+	local pos = minetest.hash_node_position(args.pos)
+	local is_primary = args.is_primary
+	if is_primary == nil then is_primary = false end
+	self.data.env.nodes[args.category][pos] = is_primary
 end
 
 _npc.env.node_store_get = function(self, args)
@@ -1001,7 +1037,7 @@ npc.proc.register_instruction("npc:env:node:place", function(self, args)
     if node_at_pos and
     	(node_at_pos.name == "air" or minetest.registered_nodes[node_at_pos.name].buildable_to == true) then
         -- Check protection
-        if (not bypass_protection and not minetest.is_protected(pos, self.npc_id))
+        if (not bypass_protection and not minetest.is_protected(pos, self.id))
                 or bypass_protection == true then
             -- Take from inventory if necessary
             local place_item = false
@@ -1486,9 +1522,10 @@ npc.proc.register_program("sample:stupid_init", {
 				},
 				loop_instructions = {
 					{key = "is_owned", name = "npc:env:node:is_owner", args = {
-						pos = function(self, args)
-							return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
-						end
+						pos = "@local.nodes.@local.for_index"
+--						function(self, args)
+--							return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
+--						end
 					}},
 					{name = "npc:if", args = {
 						expr = {
@@ -1498,9 +1535,10 @@ npc.proc.register_program("sample:stupid_init", {
 						},
 						true_instructions = {
 							{name = "npc:env:node:set_owned", args = {
-								pos = function(self, args)
-									return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
-								end,
+								pos = "@local.nodes.@local.for_index",
+--								function(self, args)
+--									return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
+--								end,
 								value=true
 							}},
 							{name = "npc:break"}
@@ -1734,16 +1772,21 @@ end
 local on_activate = function(self, staticdata)
 	if staticdata ~= nil and staticdata ~= "" then
 		local cols = string.split(staticdata, "|")
-		self["npc_id"] = cols[1]
-		self["timers"] = minetest.deserialize(cols[2])
-		self["process"] = minetest.deserialize(cols[3])
-		self["data"] = minetest.deserialize(cols[4])
+		self["timers"] = minetest.deserialize(cols[1])
+		self["process"] = minetest.deserialize(cols[2])
+		self["data"] = minetest.deserialize(cols[3])
+		
+		local info = minetest.deserialize(cols[4])
+		if info then
+			self.id = info.id
+		end
+		
 		-- Restore objects
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 		--minetest.log("Data: "..dump(self))
 	else
 
-		self.npc_id = "anpc:"..dump(math.random(1000, 9999))
+		self.id = "anpc:"..tostring(math.random(1000, 9999))
 
 		self.timers = {
 			node_below_value = 0,
@@ -1812,9 +1855,6 @@ minetest.register_entity("anpc:npc", {
 	get_staticdata = function(self)
 
 		local result = ""
-		if self.npc_id then
-			result = result..self.npc_id.."|"
-		end
 
 		if self.timers then
 			result = result..minetest.serialize(self.timers).."|"
@@ -1829,6 +1869,13 @@ minetest.register_entity("anpc:npc", {
 			self.data.temp = {}
 			--minetest.log("User data: "..dump(self.data))
 			result = result..minetest.serialize(self.data).."|"
+		end
+		
+		local info = {
+			id = self.id
+		}
+		if info then
+			result = result..minetest.serialize(info).."|"
 		end
 
 		return result
