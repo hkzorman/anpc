@@ -36,12 +36,12 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local operator = expr.op
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
-	
+
 	--minetest.log("Boolean expression: "..dump(expr))
-	
+
 	--minetest.log("Source: "..dump(source))
 	--minetest.log("Target: "..dump(target))
-	
+
 	if operator == "==" then
 		return source == target
 	elseif operator == ">=" then
@@ -106,7 +106,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 	if self.data.proc[self.process.current.id] == nil then
 		self.data.proc[self.process.current.id] = {}
 	end
-	
+
 	if type(value) == "userdata" then
 		if userdata_type then
 			if userdata_type == "object" then
@@ -114,21 +114,21 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 				if obj then
 					-- Check if player
 					if obj:is_player() then
-					
+
 						-- Store tracking record
 						self.data.proc[self.process.current.id][key] = {
 							userdata_type = "object",
 							obj_type = "player",
 							obj_attr = obj:get_player_name()
 						}
-						
+
 					elseif obj:get_luaentity() then
 						-- Generate a tracking ID for entities
 						local id = "anpc:track:id:"..tostring(math.random(1000, 9999))
 						if obj:get_luaentity().anpc_track_id then
 							id = obj:get_luaentity().anpc_track_id
 						end
-						
+
 						obj:get_luaentity().anpc_track_id = id
 						-- Store tracking record
 						self.data.proc[self.process.current.id][key] = {
@@ -139,7 +139,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 								distance = vector.distance(self.object:get_pos(), obj:get_pos()) * 3
 							}
 						}
-						
+
 						-- Store actual object so that lookups are simpler
 						self.data.temp[id] = obj
 					end
@@ -152,7 +152,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 			end
 		end
 	end
-	
+
 	--minetest.log("Keys: "..dump(self.process.current.id)..", "..dump(key))
 	self.data.proc[self.process.current.id][key] = value
 end
@@ -160,7 +160,7 @@ end
 _npc.dsl.get_var = function(self, key)
 	if self.data.proc[self.process.current.id] == nil then return nil end
 	local result = self.data.proc[self.process.current.id][key]
-	
+
 	-- TODO: Add handling for other types of userdata
 	if type(result) == "table" and result.userdata_type == "object" then
 		if result.obj_type == "player" then
@@ -173,7 +173,7 @@ _npc.dsl.get_var = function(self, key)
 			-- Check if object is in the current objects
 			for i = 1, #self.data.env.objects do
 				if self.data.env.objects[i]
-					and self.data.env.objects[i]:get_luaentity() 
+					and self.data.env.objects[i]:get_luaentity()
 					and self.data.env.objects[i]:get_luaentity().anpc_track_id
 					and self.data.env.objects[i]:get_luaentity().anpc_track_id == result.obj_attr.id then
 					return self.data.env.objects[i]
@@ -182,8 +182,8 @@ _npc.dsl.get_var = function(self, key)
 			-- Try to search object
 			local nearby_objs = minetest.get_objects_inside_radius(self.object:get_pos(), result.obj_attr.distance)
 			for i = 1, #nearby_objs do
-				if nearby_objs[i] 
-					and nearby_objs[i]:get_luaentity() 
+				if nearby_objs[i]
+					and nearby_objs[i]:get_luaentity()
 					and nearby_objs[i]:get_luaentity().anpc_track_id
 					and nearby_objs[i]:get_luaentity().anpc_track_id == result.obj_attr.id then
 					result = nearby_objs[i]
@@ -204,7 +204,7 @@ _npc.env.node_operate = function(self, args)
 	local node = minetest.get_node_or_nil(node_pos)
 	if (node) then
 		if (node_table[node.name] == nil) then return end
-	
+
 		local result = node_table[node.name].operation(self, args)
 		return result
 	end
@@ -216,7 +216,7 @@ _npc.env.node_get_property = function(self, args)
 	local node = minetest.get_node_or_nil(node_pos)
 	if (node) then
 		if (node_table[node.name] == nil) then return end
-	
+
 		local result = node_table[node.name].properties[args.property](self, args)
 		return result
 	end
@@ -227,13 +227,13 @@ _npc.env.node_get_accessing_pos = function(_, args)
 
 	local target_node = minetest.get_node_or_nil(args.pos)
 	if (target_node) then
-		if npc.pathfinder.is_good_node(target_node, {}) 
+		if npc.pathfinder.is_good_node(target_node, {})
 			== npc.pathfinder.node_types.non_walkable then
-			
+
 			-- First of all, try to see if the position in front of the node is walkable
-			if (target_node.name 
+			if (target_node.name
 				and minetest.registered_nodes[target_node.name].paramtype2 == "facedir") then
-				
+
 				local front_pos = vector.add(args.pos, vector.multiply(minetest.facedir_to_dir(target_node.param2), -1))
 				local front_node = minetest.get_node_or_nil(front_pos)
 				if front_node then
@@ -243,7 +243,7 @@ _npc.env.node_get_accessing_pos = function(_, args)
 					end
 				end
 			end
-			
+
 			-- Search all surrounding nodes
 			local count = 0
 			while count < 4 do
@@ -257,9 +257,9 @@ _npc.env.node_get_accessing_pos = function(_, args)
 				elseif count == 3 then
 					pos.z = pos.z -1
 				end
-				
+
 				local node = minetest.get_node(pos)
-				if node and node.name and minetest.registered_nodes[node.name].walkable == false then 
+				if node and node.name and minetest.registered_nodes[node.name].walkable == false then
 					return pos
 				end
 				count = count + 1
@@ -268,17 +268,17 @@ _npc.env.node_get_accessing_pos = function(_, args)
 			return args.pos
 		end
 	end
-	
+
 	return nil
 end
 
 _npc.env.node_find = function(self, args)
-	
+
 	local start_pos = args.pos or vector.round(self.object:get_pos())
 	local radius = args.radius or self.data.env.view_range
 	local min_pos = args.min_pos
 	local max_pos = args.max_pos
-	
+
 	-- Calculate area if just radius given
 	if (not min_pos) and (not max_pos) then
 		local y_radius = args.y_radius or radius
@@ -286,9 +286,9 @@ _npc.env.node_find = function(self, args)
 		min_pos = {x=start_pos.x - radius, y=(start_pos.y + y_offset) - y_radius, z=start_pos.z - radius}
 		max_pos = {x=start_pos.x + radius, y=(start_pos.y + y_offset) + y_radius, z=start_pos.z + radius}
 	end
-	
+
 	--minetest.log("Searching for "..dump(args.nodenames).."\nin area: "..minetest.pos_to_string(min_pos)..", "..minetest.pos_to_string(max_pos))
-	
+
 	local result = minetest.find_nodes_in_area(min_pos, max_pos, args.nodenames)
 	--minetest.log("Found: "..dump(result))
 	return result
@@ -296,34 +296,33 @@ end
 
 _npc.env.node_npc_is_owner = function(self, args)
 	local meta = minetest.get_meta(args.pos)
-	if (meta) then
-		local owner = meta:get_string("anpc:owner")
-		if owner == self.npc_id then
-			return true
-		else
-			return false
-		end
+	local owner = meta:get_string("anpc:owner")
+	if owner == self.npc_id then
+		return true
+	elseif owner ~= "" then
+		return false
+	else
+		return nil
 	end
-	return nil
 end
 
 _npc.env.node_npc_is_user = function(self, args)
 	local meta = minetest.get_meta(args.pos)
-	if (meta) then
-		local user = meta:get_string("anpc:user")
-		if user == self.npc_id then
-			return true
-		else
-			return false
-		end
+	local user = meta:get_string("anpc:user")
+	if user == self.npc_id then
+		return true
+	elseif user ~= "" then
+		return false
+	else
+		return nil
 	end
-	return nil
 end
 
 _npc.env.node_set_owned = function(self, args)
 	local meta = minetest.get_meta(args.pos)
 	if (meta) then
 		local owner = meta:get_string("anpc:owner")
+		minetest.log("Owner: "..dump(owner))
 		if (owner == self.npc_id) then
 			if (args.value == true) then
 				return true
@@ -332,12 +331,11 @@ _npc.env.node_set_owned = function(self, args)
 				meta:set_string("anpc:owner", nil)
 				return true
 			end
-		elseif (owner ~= nil) then
+		elseif (owner ~= "") then
 			-- Unable to change ownership as NPC is not the owner
 			return false
 		else
 			meta:set_string("anpc:owner", self.npc_id)
-			meta:set_string("infotext", "Owned by NPC: "..dump(self.npc_id))
 			return true
 		end
 	end
@@ -355,7 +353,7 @@ _npc.env.node_set_used = function(self, args)
 				meta:set_string("anpc:user", nil)
 				return true
 			end
-		elseif (user ~= nil) then
+		elseif (user ~= "") then
 			-- Unable to change user as NPC is not the user
 			return false
 		else
@@ -387,27 +385,27 @@ end
 _npc.proc.process_instruction = function(instruction, original_list_size, function_index_map)
 	local instruction_list = {}
 	local is_function = false
-	
+
 	if instruction.name == "npc:if" then
-		
+
 		-- Process true instructions if available
 		local true_instrs = {}
 		for i = 1, #instruction.args.true_instructions do
-			assert(not instruction.args.true_instructions[i].declare, 
+			assert(not instruction.args.true_instructions[i].declare,
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i], 
+			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i],
 				#true_instrs + original_list_size + 1)
 			for j = 1, #instrs do
 				true_instrs[#true_instrs + 1] = instrs[j]
 			end
 		end
-		
+
 		-- Insert jump to skip true instructions if expr is false
 		local offset = 0
 		if instruction.args.false_instructions then offset = 1 end
-		
+
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if", 
+			name = "npc:jump_if",
 			args = {
 				expr = instruction.args.expr,
 				pos =  #true_instrs + offset,
@@ -415,61 +413,61 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 				offset = true
 			}
 		}
-		
+
 		-- Insert all true_instructions into result
 		for j = 1, #true_instrs do
 			instruction_list[#instruction_list + 1] = true_instrs[j]
 		end
-		
+
 		-- False instructions
 		if instruction.args.false_instructions then
-		
+
 			-- Process false instructions if available
 			local false_instrs = {}
 			for i = 1, #instruction.args.false_instructions do
-				assert(not instruction.args.false_instructions[i].declare, 
+				assert(not instruction.args.false_instructions[i].declare,
 					"Function declaration cannot be done inside another instruction.")
-				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i], 
+				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i],
 					#false_instrs + #instruction_list + original_list_size + 1)
 				for j = 1, #instrs do
 					false_instrs[#false_instrs + 1] = instrs[j]
 				end
 			end
-			
+
 			-- Insert jump to skip false instructions if expr is true
 			instruction_list[#instruction_list + 1] = {
-				name = "npc:jump", 
+				name = "npc:jump",
 				args = {
 					pos = #false_instrs,
-					offset = true 
+					offset = true
 				}
 			}
-			
+
 			-- Insert all false_instructions
 			for j = 1, #false_instrs do
 				instruction_list[#instruction_list + 1] = false_instrs[j]
 			end
-			
+
 		end
-		
+
 	elseif instruction.name == "npc:switch" then
-	
+
 		for i = 1, #instruction.args.cases do
-			
+
 			-- Process each case instructions
 			local case_instrs = {}
 			for j = 1, #instruction.args.cases[i].instructions do
-				assert(not instruction.args.cases[i].instructions[j].declare, 
+				assert(not instruction.args.cases[i].instructions[j].declare,
 					"Function declaration cannot be done inside another instruction.")
-				local instrs = _npc.proc.process_instruction(instruction.args.cases[i].instructions[j], 
+				local instrs = _npc.proc.process_instruction(instruction.args.cases[i].instructions[j],
 					#case_instrs + original_list_size + 1)
 				for k = 1, #instrs do
 					case_instrs[#case_instrs + 1] = instrs[k]
 				end
 			end
-			
+
 			instruction_list[#instruction_list + 1] = {
-				name = "npc:jump_if", 
+				name = "npc:jump_if",
 				args = {
 					expr = instruction.args.cases[i].case,
 					pos =  #case_instrs,
@@ -477,16 +475,16 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 					offset = true
 				}
 			}
-			
+
 			-- Insert all case instructions
 			for j = 1, #case_instrs do
 				instruction_list[#instruction_list + 1] = case_instrs[j]
 			end
-			
+
 		end
-		
+
 	elseif instruction.name == "npc:while" then
-	
+
 		-- Support time-based while loop.
 		-- The loop will execute as many times as possible within the given time.
 		-- The given time is in seconds, no smaller resolution supported.
@@ -500,228 +498,228 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 				right = instruction.args.time
 			}
 		end
-	
+
 		-- The below will actually set the jump to the instruction previous
 		-- to the relevant one - this is done because after the jump
 		-- instruction is executed, the instruction counter will be increased
 		local loop_start = #instruction_list + original_list_size
 		-- Insert all loop instructions
 		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare, 
+			assert(not instruction.args.loop_instructions[i].declare,
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
 				loop_start)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
 		end
-		
+
 		-- Insert conditional to loop back if expr is true
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if", 
+			name = "npc:jump_if",
 			args = {
-				expr = instruction.args.expr, 
-				pos = loop_start - 1, 
+				expr = instruction.args.expr,
+				pos = loop_start - 1,
 				negate = false
 			},
 			loop_end = true
 		}
-		
+
 		-- Add instruction to stop timer
 		if instruction.args.time then
 			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:stop"}
 		end
-		
+
 	elseif instruction.name == "npc:for" then
-	
+
 		-- Initialize loop variable
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
 				key = "for_index",
 				value = instruction.args.initial_value
 			}
 		}
-	
+
 		-- The below will actually set the jump to the instruction previous
 		-- to the relevant one - this is done because after the jump
 		-- instruction is executed, the instruction counter will be increased
 		local loop_start = #instruction_list + original_list_size
 		-- Insert all loop instructions
 		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare, 
+			assert(not instruction.args.loop_instructions[i].declare,
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
 				loop_start)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
 		end
-		
+
 		-- Insert loop variable increase instruction
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
-				key = "for_index", 
+				key = "for_index",
 				value = function(self, args)
-					return self.data.proc[self.process.current.id]["for_index"] 
+					return self.data.proc[self.process.current.id]["for_index"]
 						+ instruction.args.step_increase
 				end
 			}
 		}
-		
+
 		-- Insert conditional to loop back if expr is true
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if", 
+			name = "npc:jump_if",
 			args = {
 				expr = instruction.args.expr,
-				pos = loop_start - 1, 
+				pos = loop_start - 1,
 				negate = false
 			},
 			loop_end = true
 		}
-	
+
 	-- TODO: Remove for each?
 	elseif instruction.name == "npc:for_each" then
-	
+
 		--assert(type(instruction.args.array) == "table")
-	
+
 		-- Initialize loop variables
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
-				key = "for_index", 
+				key = "for_index",
 				value = 1
 			}
 		}
-		
+
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
-				key = "for_value", 
+				key = "for_value",
 				value = function(self, args)
 					local array = _npc.dsl.evaluate_argument(instruction.args.array)
 					return array[1]
 				end
 			}
 		}
-	
+
 		-- The below will actually set the jump to the instruction previous
 		-- to the relevant one - this is done because after the jump
 		-- instruction is executed, the instruction counter will be increased
 		local loop_start = #instruction_list + original_list_size
 		-- Insert all loop instructions
 		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare, 
+			assert(not instruction.args.loop_instructions[i].declare,
 				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i], 
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
 				loop_start)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
 		end
-		
+
 		-- Insert loop variable increase instruction
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
-				key = "for_index", 
+				key = "for_index",
 				value = function(self, args)
 					return self.data.proc[self.process.current.id]["for_index"] + 1
 				end
 			}
 		}
-		
+
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set", 
+			name = "npc:var:set",
 			args = {
-				key = "for_value", 
+				key = "for_value",
 				value = function(self, args)
 					local array = _npc.dsl.evaluate_argument(instruction.args.array)
 					return array[self.data.proc[self.process.current.id].for_index]
 				end
 			}
 		}
-		
+
 		-- Insert conditional to loop back if expr is true
 		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if", 
+			name = "npc:jump_if",
 			args = {
 				expr = {
-					left = "@local.for_index", 
-					op = "<=", 
+					left = "@local.for_index",
+					op = "<=",
 					right = function(self, args)
 						return #self.data.proc[self.process.current.id].for_array
 					end
 				},
-				pos = loop_start - 1, 
+				pos = loop_start - 1,
 				negate = false
 			},
 			loop_end = true
 		}
-		
+
 		-- Remove the array and the for-value variables
-		instruction_list[#instruction_list + 1] = 
+		instruction_list[#instruction_list + 1] =
 			{name = "npc:var:set", args = {key="for_value", value=nil}}
-	
+
 	elseif instruction.name == "npc:wait" then
-	
+
 		-- This is not a busy wait, this modifies the interval in two instructions
 		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil) - 1
-		instruction_list[#instruction_list + 1] = 
+		instruction_list[#instruction_list + 1] =
 			{name="npc:set_proc_interval", args={value = wait_time}}
 		instruction_list[#instruction_list + 1] =
 			{name="npc:set_proc_interval", args={value = 1}}
-	
+
 	elseif not instruction.name and instruction.declare then
-	
+
 		-- Store function index in map
 		local func_index = #instruction_list + original_list_size
 		function_index_map[instruction.declare] = func_index
-	
+
 		minetest.log("Function declaration: "..dump(instruction))
-	
+
 		-- Process all instructions
 		for i = 1, #instruction.instructions do
-			local instrs = _npc.proc.process_instruction(instruction.instructions[i], 
+			local instrs = _npc.proc.process_instruction(instruction.instructions[i],
 				func_index)
 			for j = 1, #instrs do
 				instruction_list[#instruction_list + 1] = instrs[j]
 			end
 		end
-		
+
 		is_function = true
-		
+
 	elseif not instruction.name and instruction.call then
-		
+
 		-- Validate we are calling an existing instruction
 		local index = function_index_map[instruction.call]
 		assert(index, "Function "..instruction.call.." not found")
-		
-		instruction_list[#instruction_list + 1] = 
+
+		instruction_list[#instruction_list + 1] =
 			{name="npc:call", args = {name = instruction.call, index = index, key = instruction.key}}
-		
+
 	elseif instruction.name == "npc:timer:register" then
-	
+
 		-- Validations
 		assert(instruction.args.name, "Timer needs a name")
 		local timer_name = "_timer:"..instruction.args.name
-		
+
 		-- Add a return instruction
 		local timer_func_instr = instruction.args.instructions
 		timer_func_instr[#timer_func_instr + 1] = {name="npc:return"}
-		
+
 		-- Process all instructions, and register function
 		local all_instructions, timer_func_index = _npc.proc.process_instruction({
-			declare = timer_name, 
+			declare = timer_name,
 			instructions = instruction.args.instructions
 		}, original_list_size, function_index_map)
-		
+
 		-- Add all instructions
 		for i = 1, #all_instructions do
 			instruction_list[#instruction_list + 1] = all_instructions[i]
 		end
-		
+
 		instruction_list[#instruction_list + 1] = {name="npc:timer:register", args = {
 			name = instruction.args.name,
 			interval = instruction.args.interval,
@@ -729,13 +727,13 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			times_to_run = instruction.args.times_to_run,
 			function_index = original_list_size
 		}}
-	
+
 		is_function = true
 	else
 		-- Insert the instruction
 		instruction_list[#instruction_list + 1] = instruction
 	end
-	
+
 	return instruction_list, is_function
 end
 
@@ -753,42 +751,42 @@ npc.proc.register_program = function(name, raw_instruction_list)
 		local initial_instruction = 0
 		for i = 1, #raw_instruction_list do
 			-- The following instructions are only for internal use
-			assert(raw_instruction_list[i].name ~= "npc:jump", 
+			assert(raw_instruction_list[i].name ~= "npc:jump",
 				"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:jump_if", 
+			assert(raw_instruction_list[i].name ~= "npc:jump_if",
 				"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:set_process_interval", 
+			assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
 				"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start", 
+			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
 				"Instruction 'npc:timer:instr:start' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop", 
+			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop",
 				"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
-			
-			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i], 
+
+			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i],
 				#instruction_list + 1, function_table)
 			for j = 1, #instructions do
 				instruction_list[#instruction_list + 1] = instructions[j]
 			end
-			
+
 			if is_function then
 				-- Count the number of instructions inside function
 				initial_instruction = initial_instruction + #instructions
 			end
 		end
-		
+
 		if initial_instruction == 0 then initial_instruction = 1 end
-	
+
 		program_table[name] = {
 			function_table = function_table,
 			initial_instruction = initial_instruction,
 			instructions = instruction_list
 		}
-		
+
 		minetest.log("Registered and compiled program '"..dump(name).."':")
 		for i = 1, #instruction_list do
 			minetest.log("["..dump(i).."] = "..dump(instruction_list[i]))
 		end
-		
+
 		--minetest.log(dump(program_table))
 		return true
 	end
@@ -843,7 +841,7 @@ npc.proc.register_instruction("npc:jump", function(self, args)
 	else
 		self.process.current.instruction = args.pos
 	end
-	
+
 	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
 end)
 
@@ -858,7 +856,7 @@ npc.proc.register_instruction("npc:jump_if", function(self, args)
 		else
 			self.process.current.instruction = args.pos
 		end
-	
+
 		--minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
 	end
 
@@ -886,13 +884,13 @@ npc.proc.register_instruction("npc:call", function(self, args)
 	if not self.data.proc[self.process.current.id]["_call_stack"] then
 		self.data.proc[self.process.current.id]["_call_stack"] = {}
 	end
-	
+
 	local top = #self.data.proc[self.process.current.id]["_call_stack"] + 1
 	self.data.proc[self.process.current.id]["_call_stack"][top] = {
 		key = args.key,
 		index = args.index
 	}
-	
+
 	self.process.current.instruction = args.index
 
 end)
@@ -901,15 +899,15 @@ npc.proc.register_instruction("npc:return", function(self, args)
 
 	local top = #self.data.proc[self.process.current.id]["_call_stack"]
 	local stack_entry = self.data.proc[self.process.current.id]["_call_stack"][top]
-	
+
 	-- Set the variable, if needed
 	if args.value and stack_entry.key then
 		_npc.dsl.set_var(self, stack_entry.key, args.value)
 	end
-	
+
 	-- Change current instruction pointer
 	self.process.current.instruction = stack_entry.index
-	
+
 	-- Remove from stack
 	self.data.proc[self.process.current.id]["_call_stack"][top] = nil
 
@@ -924,11 +922,11 @@ npc.proc.register_instruction("npc:timer:register", function(self, args)
 	if self.data.proc[self.process.current.id] == nil then
 		self.data.proc[self.process.current.id] = {}
 	end
-	
+
 	if self.data.proc[self.process.current.id]["_timers"] == nil then
 		self.data.proc[self.process.current.id]["_timers"] = {}
 	end
-	
+
 	self.data.proc[self.process.current.id]["_timers"][args.name] = {
 		interval = args.interval,
 		value = args.initial_value or 0,
@@ -967,28 +965,28 @@ end)
 -- Environment-related instructions
 -----------------------------------------------------------------------------------
 
-npc.proc.register_instruction("npc:env:node:operate", 
+npc.proc.register_instruction("npc:env:node:operate",
 	_npc.env.node_operate)
 
-npc.proc.register_instruction("npc:env:node:get_property", 
+npc.proc.register_instruction("npc:env:node:get_property",
 	_npc.env.node_get_property)
-	
+
 npc.proc.register_instruction("npc:env:node:get_accessing_pos",
 	_npc.env.node_get_accessing_pos)
 
-npc.proc.register_instruction("npc:env:node:find", 
+npc.proc.register_instruction("npc:env:node:find",
 	_npc.env.node_find)
-	
-npc.proc.register_instruction("npc:env:node:is_owner", 
+
+npc.proc.register_instruction("npc:env:node:is_owner",
 	_npc.env.node_npc_is_owner)
-	
-npc.proc.register_instruction("npc:env:node:is_user", 
+
+npc.proc.register_instruction("npc:env:node:is_user",
 	_npc.env.node_npc_is_user)
 
-npc.proc.register_instruction("npc:env:node:set_owned", 
+npc.proc.register_instruction("npc:env:node:set_owned",
 	_npc.env.node_set_owned)
-	
-npc.proc.register_instruction("npc:env:node:set_used", 
+
+npc.proc.register_instruction("npc:env:node:set_used",
 	_npc.env.node_set_used)
 
 npc.proc.register_instruction("npc:env:node:place", function(self, args)
@@ -1048,9 +1046,9 @@ npc.proc.register_instruction("npc:env:find_path", function(self, args)
 
 	local end_pos = args.end_pos
 	local start_pos = args.start_pos or vector.round(self.object:get_pos())
-	
+
 	--minetest.log("Start pos: "..dump(start_pos))
-	
+
 	local path = npc.pathfinder.find_path(start_pos, end_pos, self, args.decorate)
 	--minetest.log("Path found: "..dump(path))
 	self.data.proc[self.process.current.id].current_path = path
@@ -1067,28 +1065,28 @@ npc.proc.register_instruction("npc:env:prioritize", function(self, args)
 
 	local distance = args.distance 		 -- Supported values: "min", "max", an integer number
 	local entity_type = args.entity_type -- Supported values: "player", "npc", "monster"
-	
+
 	local self_pos = self.object:get_pos()
 	local min_dist = vector.distance(self_pos, self.data.env.objects[1]:get_pos())
 	local max_dist = vector.distance(self_pos, self.data.env.objects[1]:get_pos())
-	
+
 	for i = 1, #self.data.env.objects do
 		if self.data.env.objects[i]
 			and self.data.env.objects[i]:get_luaentity() then
 			local pos = self.data.env.objects[i]:get_pos()
 			local is_player = self.data.env.objects[i]:is_player()
 			local distance = vector.distance(self_pos, pos)
-			
+
 			if (type(distance) == "string") then
 				if distance == "min" then
 					if distance < min_dist then
-					
+
 					end
 				elseif (distance == "max") then
-					
+
 				end
 			elseif (type(distance) == "number") then
-				
+
 			end
 		end
 	end
@@ -1099,10 +1097,10 @@ end)
 -----------------------------------------------------------------------------------
 
 _npc.move.set_animation = function(self, args)
-	--local animation_name = 
+	--local animation_name =
 end
 
-npc.proc.register_instruction("npc:move:set_animation", 
+npc.proc.register_instruction("npc:move:set_animation",
 	_npc.move.set_animation)
 
 npc.proc.register_instruction("npc:move:stand", function(self, args)
@@ -1124,7 +1122,7 @@ npc.proc.register_instruction("npc:move:move_to", function(self, args)
 end)
 
 -- This instruction sets the NPC in motion towards a specific direction at
--- a specific speed. Notice that this instruction *doesn't* provides 
+-- a specific speed. Notice that this instruction *doesn't* provides
 -- pathfinding. Also, notice this doesn't stops the NPC once in motion.
 -- The stop has to be done separately by using the instruction `npc:move:stand`.
 -- There are two different ways to use it:
@@ -1140,7 +1138,7 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	local velocity = nil
 	local self_pos = args.start_pos or vector.round(self.object:get_pos())
 	local trgt_pos = args.target_pos
-	
+
 	if (cardinal_dir) then
 		if cardinal_dir == 0 then
         	velocity = {x=0, y=0, z=1}
@@ -1159,7 +1157,7 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 		elseif cardinal_dir == 7 then
 		    velocity = {x=-1, y=0, z=1}
 		end
-		
+
 		trgt_pos = vector.add(self_pos, velocity)
 		velocity = vector.multiply(velocity, speed)
 	end
@@ -1167,7 +1165,7 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	local dir = vector.direction(self_pos, trgt_pos)
 	local yaw = args.yaw or minetest.dir_to_yaw(dir)
 	if not velocity then velocity = vector.multiply(dir, speed) end
-	
+
 	self.object:set_yaw(yaw)
 	self.object:set_velocity(velocity)
 	self.object:set_animation({
@@ -1181,18 +1179,18 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	local self_pos = vector.round(self.object:get_pos())
 	local trgt_pos = args.target_pos
 	local speed = args.speed or 2
-	
+
 	-- Calculate process timer interval
 	if (speed ~= 2) then
 		self.data.proc[self.process.current.id]["_prev_proc_timer_value"] = self.timers.proc_int
 		self.timers.proc_int = 1/speed
 	end
-	
+
 	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_timer_value"] or 0.5
-	
+
 	-- Return if target pos is same as start pos
 	if self_pos.x == trgt_pos.x
-		and self_pos.z == trgt_pos.z then 
+		and self_pos.z == trgt_pos.z then
 		minetest.log("Same self pos and target pos")
 		-- Stop NPC
 		self.object:set_velocity({x = 0, y = 0, z = 0})
@@ -1201,33 +1199,33 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		    x = npc.ANIMATION_STAND_START,
 		    y = npc.ANIMATION_STAND_END},
 		    30, 0)
-		if args.original_target_pos and 
+		if args.original_target_pos and
 			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
 			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
 		end
 		-- Restore process timer interval
 		self.timers.proc_int = prev_proc_timer_value
-		return true 
+		return true
 	end
-	
+
 	-- Find path
 	if args.check_end_pos_walkable == true then
 		trgt_pos = _npc.env.node_get_accessing_pos(trgt_pos)
 	end
-	
+
 	-- Correct self pos if NPC is lagging behind
 	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"]
 	if prev_trgt_pos ~= nil then
-		local dist = vector.distance(prev_trgt_pos, self_pos) 
+		local dist = vector.distance(prev_trgt_pos, self_pos)
 		if (dist > 0.25) then
 			-- TODO Check that we are not going backwards?
 			self.object:move_to({x=prev_trgt_pos.x, y=prev_trgt_pos.y, z=prev_trgt_pos.z}, true)
 			self_pos = prev_trgt_pos
 		end
 	end
-	
+
 	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
-	if not path then 
+	if not path then
 		-- Restore process timer interval
 		self.timers.proc_int = prev_proc_timer_value
 		if args.force == true then
@@ -1235,41 +1233,41 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		end
 		return nil
 	end
-	
+
 	-- Move towards position
 	local next_node = path[1]
 	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z then
 		next_node = path[2]
 	end
-	
+
 	local next_pos = next_node.pos
-	
+
 	local dir = vector.direction(self_pos, next_pos)
 	local yaw = minetest.dir_to_yaw(dir)
-	
+
 	-- Store next target pos for position correction
 	self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
-	
+
 	-- Rotate towards next node
 	self.object:set_yaw(yaw)
-	
+
 	-- Check the type of the next position
 	-- If walkable, just walk
 	if next_node.type == npc.pathfinder.node_types.walkable then
 		-- Diagonal movement speed must be increased
 		if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
 		local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
-		
+
 		self.object:set_velocity(vel)
 		self.object:set_animation({
 		    x = npc.ANIMATION_WALK_START,
 		    y = npc.ANIMATION_WALK_END},
 		    30, 0)
-	
+
 	-- If openable, check the state. If it's open, NPC will close. If it's closed,
 	-- NPC will open and close.
 	elseif next_node.type == npc.pathfinder.node_types.openable then
-	
+
 		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
 		if (is_open ~= nil) then
 			if (is_open == true) then
@@ -1279,11 +1277,11 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
 			end
 		end
-		
+
 	end
-        
+
     return false
-	
+
 end)
 
 -----------------------------------------------------------------------------------
@@ -1314,27 +1312,27 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		end
 	end
 	minetest.log("Executing instruction: ["..dump(self.process.current.instruction).."] "..dump(name))
-	
+
 	local result = instruction_table[name](self, args)
 	if (result_key) then
 		minetest.log("Instruction returned: "..dump(result))
 		_npc.dsl.set_var(self, result_key, result)
 		--self.data.proc[self.process.current.id][result_key] = result
 	end
-	
+
 	local env_si, env_ei = string.find(name, "npc:env:")
-	if name == "npc:jump" 
+	if name == "npc:jump"
 		or name == "npc:jump_if"
-		or name == "npc:break" 
-		or name == "npc:var:get" 
+		or name == "npc:break"
+		or name == "npc:var:get"
 		or name == "npc:var:set"
 		or name == "npc:timer:instr:start"
 		or name == "npc:timer:instr:stop"
 		or env_si ~= nil then
-		
+
 		-- Execute next instruction now if possible
 		self.process.current.instruction = self.process.current.instruction + 1
-		
+
 		local instruction = program_table[self.process.current.name].instructions[self.process.current.instruction]
 		if instruction then
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
@@ -1405,10 +1403,10 @@ npc.proc.register_program("builtin:idle", {
 				expr = function(self, args)
 					-- Random 50% chance
 					local chance = math.random(1, 100)
-					if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then 
-						return false 
+					if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
+						return false
 					end
-					
+
 					local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
 					if object then
 						local object_pos = object:get_pos()
@@ -1417,7 +1415,7 @@ npc.proc.register_program("builtin:idle", {
 							and vector.distance(object_pos, self_pos) > 0
 					end
 					return false
-				end, 
+				end,
 				true_instructions = {
 					{name = "npc:while", args = {time = 5, loop_instructions = {
 						{name = "npc:move:rotate", args={
@@ -1499,7 +1497,12 @@ npc.proc.register_program("sample:stupid_init", {
 							right = nil
 						},
 						true_instructions = {
-							{name = "npc:env:node:set_owned", args = {value=true}},
+							{name = "npc:env:node:set_owned", args = {
+								pos = function(self, args)
+									return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
+								end,
+								value=true
+							}},
 							{name = "npc:break"}
 						},
 					}}
@@ -1510,14 +1513,14 @@ npc.proc.register_program("sample:stupid_init", {
 })
 
 
-npc.proc.register_program("builtin:node_query", {
+npc.proc.register_program("builtin:node_query_simple", {
 	{key = "nodes", name = "npc:env:node:find", args = {
 		radius = "@args.radius",
 		nodenames = "@args.nodes"
 	}},
 	{name = "npc:if", args = {
 		expr = function(self, args)
-			return #self.data.proc[self.process.current.id].nodes > 0 
+			return #self.data.proc[self.process.current.id].nodes > 0
 		end,
 		true_instructions = {
 			{name = "npc:execute", args = {
@@ -1526,7 +1529,40 @@ npc.proc.register_program("builtin:node_query", {
 					-- Choose a random pos
 					local index = math.random(1, #self.data.proc[self.process.current.id].nodes)
 					local result = self.data.proc[self.process.current.id].nodes[index]
-					
+
+					return {
+						end_pos = result
+					}
+				end
+			}}
+		},
+		false_instructions = {
+			-- Move in a random direction
+			{name = "npc:move:walk", args = {
+				cardinal_dir = function(self, args) return math.random(1,7) end
+			}},
+			{name = "npc:move:stand"}
+		}
+	}}
+})
+
+npc.proc.register_program("builtin:node_query", {
+	{key = "nodes", name = "npc:env:node:find", args = {
+		radius = "@args.radius",
+		nodenames = "@args.nodes"
+	}},
+	{name = "npc:if", args = {
+		expr = function(self, args)
+			return #self.data.proc[self.process.current.id].nodes > 0
+		end,
+		true_instructions = {
+			{name = "npc:execute", args = {
+				name = "builtin:walk_to_pos",
+				args = function(self, args)
+					-- Choose a random pos
+					local index = math.random(1, #self.data.proc[self.process.current.id].nodes)
+					local result = self.data.proc[self.process.current.id].nodes[index]
+
 					return {
 						end_pos = result
 					}
@@ -1595,12 +1631,12 @@ local do_step = function(self, dtime)
 	-- Process queue
 	if (self.timers.proc_value > self.timers.proc_int) then
 		self.timers.proc_value = 0
-		
+
 		-- Increase instruction timer if available
 		if (self.timers.instr_timer) then
 			self.timers.instr_timer = self.timers.instr_timer + 1
 		end
-		
+
 		-- Run timers
 		if (self.data.proc[self.process.current.id]) then
 			local timers = self.data.proc[self.process.current.id]["_timers"]
@@ -1637,7 +1673,7 @@ local do_step = function(self, dtime)
 			if self.process.current.instruction > #program_table[self.process.current.name].instructions then
 				-- If process is state process, reset instruction counter
 				if self.process.current.name == self.process.state.name then
-					self.process.current.instruction = 
+					self.process.current.instruction =
 						program_table[self.process.current.name].initial_instruction
 				else
 					-- No more instructions, deque process
@@ -1658,7 +1694,7 @@ local do_step = function(self, dtime)
 						self.process.current.id = self.process.state.id
 						self.process.current.name = self.process.state.name
 						self.process.current.args = self.process.state.args
-						self.process.current.instruction = 
+						self.process.current.instruction =
 							program_table[self.process.current.name].initial_instruction
 					end
 				else
@@ -1677,16 +1713,16 @@ local do_step = function(self, dtime)
 				self.process.current.id = self.process.state.id
 				self.process.current.name = self.process.state.name
 				self.process.current.args = self.process.state.args
-				self.process.current.instruction = 
+				self.process.current.instruction =
 					program_table[self.process.current.name].initial_instruction
 			end
 		end
-		
+
 		--minetest.log("Process now: "..dump(process))
 
 		-- Execute next instruction, if available
 		if self.process.current.instruction > -1 then
-			local instruction = 
+			local instruction =
 				program_table[self.process.current.name].instructions[self.process.current.instruction]
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
 			self.process.current.instruction = self.process.current.instruction + 1
@@ -1698,9 +1734,10 @@ end
 local on_activate = function(self, staticdata)
 	if staticdata ~= nil and staticdata ~= "" then
 		local cols = string.split(staticdata, "|")
-		self["timers"] = minetest.deserialize(cols[1])
-		self["process"] = minetest.deserialize(cols[2])
-		self["data"] = minetest.deserialize(cols[3])
+		self["npc_id"] = cols[1]
+		self["timers"] = minetest.deserialize(cols[2])
+		self["process"] = minetest.deserialize(cols[3])
+		self["data"] = minetest.deserialize(cols[4])
 		-- Restore objects
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 		--minetest.log("Data: "..dump(self))
@@ -1755,8 +1792,9 @@ local on_activate = function(self, staticdata)
 			}
 		}
 	end
-	
+
 	self.object:set_acceleration({x=0, y=-10, z=0})
+
 end
 
 minetest.register_entity("anpc:npc", {
@@ -1774,6 +1812,10 @@ minetest.register_entity("anpc:npc", {
 	get_staticdata = function(self)
 
 		local result = ""
+		if self.npc_id then
+			result = result..self.npc_id.."|"
+		end
+
 		if self.timers then
 			result = result..minetest.serialize(self.timers).."|"
 		end
