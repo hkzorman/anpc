@@ -66,8 +66,8 @@ function pathfinder.get_decorated_path(path)
 	for i = 1, #path do
 		local node = minetest.get_node(path[i])
 		path_detail[#path_detail + 1] = {
-			pos={x=path[i].x, y=path[i].y-0.5, z=path[i].z},
-			type=pathfinder.is_good_node(node, {})
+			pos={x=path[i].x, y=path[i].y, z=path[i].z},
+			type=npc.pathfinder.is_good_node(node, {})
 		}
 	end
 
