@@ -1,5 +1,6 @@
 npc = {
-	proc = {}
+	proc = {},
+	env  = {}
 }
 
 local path = minetest.get_modpath("anpc")
