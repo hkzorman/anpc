@@ -152,10 +152,10 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 	--minetest.log("Keys: "..dump(self.process.current.id)..", "..dump(key))
 	self.data.proc[self.process.current.id][key] = value
 	--minetest.log("Self data after: "..dump(self.data.proc))
-	minetest.log("Key: "..dump(key))
-	minetest.log("Value: "..dump(value))
-	minetest.log("ID: "..dump(self.process.current.id))
-	minetest.log("Part after: "..dump(self.data.proc[self.process.current.id]))
+	-- minetest.log("Key: "..dump(key))
+	-- minetest.log("Value: "..dump(value))
+	-- minetest.log("ID: "..dump(self.process.current.id))
+	-- minetest.log("Part after: "..dump(self.data.proc[self.process.current.id]))
 end
 
 _npc.dsl.get_var = function(self, key)
@@ -915,8 +915,14 @@ npc.proc.register_instruction("npc:return", function(self, args)
 end)
 
 npc.proc.register_instruction("npc:execute", function(self, args)
+	local processed_args = {}
+	if args.args then
+		for arg_key,arg_value in pairs(args.args) do
+			processed_args[arg_key] = _npc.dsl.evaluate_argument(self, arg_value, raw_args)
+		end
+	end
 	self.process.current.called_execute = true
-	npc.proc.execute_program(self, args.name, args.args)
+	npc.proc.execute_program(self, args.name, processed_args)
     _npc.program_changed = true
 end)
 
@@ -1350,21 +1356,17 @@ npc.proc.enqueue_program = function(self, name, args)
 end
 
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
+
 	assert(instruction_table[name] ~= nil)
-	local args = {}
+
+	minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
+
+	local processed_args = {}
 	if raw_args then
-		for key,value in pairs(raw_args) do
-			args[key] = _npc.dsl.evaluate_argument(self, value, raw_args)
-            -- Evaluate one more level of arguments if present
-            if ((name == "npc:execute" or name == "npc:set_state_process") and key == "args") then
-                for k,v in pairs(args[key]) do
-                    args[key][k] = _npc.dsl.evaluate_argument(self, v, args[key])
-                    minetest.log("Arg: "..dump(k)..", val: "..dump(v)..", trgt_v: "..dump(args[key][k]))
-                end
-            end
+		for arg_key,arg_value in pairs(raw_args) do
+			processed_args[arg_key] = _npc.dsl.evaluate_argument(self, arg_value, raw_args)
 		end
 	end
-	minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
 
 	-- Increase the current instruction before execution of program - on re-entry,
 	-- this will cause going to next instruction
@@ -1372,15 +1374,13 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		self.process.current.instruction = self.process.current.instruction + 1
 	end
 
-	local result = instruction_table[name](self, args)
+	local result = instruction_table[name](self, processed_args)
 	if (result_key) then
 		minetest.log("Instruction returned: "..dump(result))
 		_npc.dsl.set_var(self, result_key, result)
-		--self.data.proc[self.process.current.id][result_key] = result
 	end
 
 	local env_si, env_ei = string.find(name, "npc:env:")
-    --minetest.log("Process: "..dump(self.process))
 	if name == "npc:jump"
 		or name == "npc:jump_if"
 		or name == "npc:break"
@@ -1396,7 +1396,6 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		local instruction = program_table[self.process.current.name].instructions[self.process.current.instruction]
 		if instruction then
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
-            --minetest.log("Next 1")
         end
 	end
 end
