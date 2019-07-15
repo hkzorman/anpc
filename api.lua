@@ -26,6 +26,10 @@ local animation_table = {}
 local programs = {}
 local instructions = {}
 
+-----------------------------------------------------------------------------------
+-- DSL Functions
+-----------------------------------------------------------------------------------
+
 -- At least left and op are necessary
 _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local operator = expr.op
@@ -73,6 +77,8 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 				result = self.data.env[expression_values[2]]
 			elseif storage_type == "@random" then
 				return math.random(expression_values[2], expression_values[3])
+			elseif storage_type == "@time" then
+				return 24000 * minetest.get_timeofday()
 			end
 			if #expression_values > 2 then
 				--minetest.log("Returning: "..dump(result[tonumber(expression_values[3])]))
@@ -98,7 +104,7 @@ end
 
 -- Nil-safe set variable function, plus handling of userdata variables
 _npc.dsl.set_var = function(self, key, value, userdata_type)
-	minetest.log("Part: before"..dump(self.data.proc[self.process.current.id]))
+	--minetest.log("Part: before"..dump(self.data.proc[self.process.current.id]))
 	if self.data.proc[self.process.current.id] == nil then
 		self.data.proc[self.process.current.id] = {}
 	end
@@ -149,13 +155,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 		end
 	end
 
-	--minetest.log("Keys: "..dump(self.process.current.id)..", "..dump(key))
 	self.data.proc[self.process.current.id][key] = value
-	--minetest.log("Self data after: "..dump(self.data.proc))
-	-- minetest.log("Key: "..dump(key))
-	-- minetest.log("Value: "..dump(value))
-	-- minetest.log("ID: "..dump(self.process.current.id))
-	-- minetest.log("Part after: "..dump(self.data.proc[self.process.current.id]))
 end
 
 _npc.dsl.get_var = function(self, key)
@@ -200,6 +200,10 @@ _npc.dsl.get_var = function(self, key)
 	return result
 end
 
+-----------------------------------------------------------------------------------
+-- Environmental functions
+-----------------------------------------------------------------------------------
+
 _npc.env.node_operate = function(self, args)
 	local node_pos = args.pos
 	local node = minetest.get_node_or_nil(node_pos)
@@ -226,10 +230,13 @@ end
 
 _npc.env.node_get_accessing_pos = function(_, args)
 
+	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
+	minetest.log("Force an accessing node? "..dump(args.force))
+
 	local target_node = minetest.get_node_or_nil(args.pos)
 	if (target_node) then
 		if npc.pathfinder.is_good_node(target_node, {})
-			== npc.pathfinder.node_types.non_walkable then
+			== npc.pathfinder.node_types.non_walkable or args.force == true then
 
 			-- First of all, try to see if the position in front of the node is walkable
 			if (target_node.name
@@ -248,7 +255,12 @@ _npc.env.node_get_accessing_pos = function(_, args)
 			-- Search all surrounding nodes
 			local count = 0
 			while count < 4 do
-				local pos = args.pos
+				-- Create copy of pos
+				local pos = {
+					x = args.pos.x,
+					y = args.pos.y,
+					z = args.pos.z
+				}
 				if count == 0 then
 					pos.x = pos.x + 1
 				elseif count == 1 then
@@ -261,6 +273,7 @@ _npc.env.node_get_accessing_pos = function(_, args)
 
 				local node = minetest.get_node(pos)
 				if node and node.name and minetest.registered_nodes[node.name].walkable == false then
+					minetest.log("Returning this accessing pos: "..minetest.pos_to_string(pos))
 					return pos
 				end
 				count = count + 1
@@ -376,6 +389,53 @@ _npc.env.node_store_remove = function(self, args)
 
 end
 
+-----------------------------------------------------------------------------------
+-- Scheduling functions
+-----------------------------------------------------------------------------------
+-- The scheduling functionality is as follows:
+--   - A scheduled entry has the following parameters:
+--     - earliest start time
+--     - latest start time
+--	   - recurrency type
+--     - repeat interval
+--     - end time (if repeat interval given, if not given, repeat always)
+--     - dependent schedule entry ID
+--   - A schedule entry is for a *single* job
+--   - A scheduled job will be priority-enqueued (using npc.execute_program)
+--     - If this job sets a state process, it needs to state how to do it (e.g.
+--       future state vs. immediate state process)
+-----------------------------------------------------------------------------------
+
+-- TODO: Support weekly, monthly and yearly recurrencies
+npc.schedule.recurrency_type = {
+	["none"] = "none",
+	["daily"] = "daily"
+}
+
+-- This function adds an entry (as defined above) to the NPC's schedule
+-- data.
+_npc.proc.schedule_add = function(self, args)
+
+	self.data.schedule[#self.data.schedule + 1] = {
+		program_name = args.program_name,
+		earliest_start_time = args.earliest_start_time,
+		latest_start_time = args.latest_start_time,
+		repeat_interval = args.repeat_interval,
+		end_time = args.end_time,
+		dependent_entry_id = args.dependent_entry_id
+	}
+	
+	return #self.data.schedule
+end
+
+_npc.proc.schedule_remove = function(self, args)
+	if self.data.schedule[args.entry_id] ~= nil then
+		self.data.schedule[args.entry_id] = nil
+		return true
+	else
+		return false
+	end
+end
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -664,13 +724,17 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			{name = "npc:var:set", args = {key="for_value", value=nil}}
 
 	elseif instruction.name == "npc:wait" then
-
+	
 		-- This is not a busy wait, this modifies the interval in two instructions
-		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil) - 1
+		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil)
+		instruction_list[#instruction_list + 1] = 
+			{key="_prev_proc_int", name="npc:get_proc_interval"}
 		instruction_list[#instruction_list + 1] =
-			{name="npc:set_proc_interval", args={value = wait_time}}
+			{name="npc:set_proc_interval", args={wait_time = wait_time, value = function(self, args)
+				return args.wait_time - self.timers.proc_int
+			end}}
 		instruction_list[#instruction_list + 1] =
-			{name="npc:set_proc_interval", args={value = 1}}
+			{name="npc:set_proc_interval", args={value = "@local._prev_proc_int"}}
 
 	elseif not instruction.name and instruction.declare then
 
@@ -849,18 +913,13 @@ end)
 npc.proc.register_instruction("npc:jump_if", function(self, args)
 	local condition = args.expr
 	if args.negate == true then condition = not condition end
-	--minetest.log("Jump-If: Expression: "..dump(args.expr))
-	--minetest.log("Jump-If: Condition: "..dump(condition))
 	if condition == true then
 		if args.offset == true then
 			self.process.current.instruction = self.process.current.instruction + args.pos
 		else
 			self.process.current.instruction = args.pos
 		end
-
-		--minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
 	end
-
 end)
 
 npc.proc.register_instruction("npc:break", function(self, args)
@@ -876,6 +935,10 @@ end)
 
 npc.proc.register_instruction("npc:set_proc_interval", function(self, args)
 	self.timers.proc_int = args.value
+end)
+
+npc.proc.register_instruction("npc:get_proc_interval", function(self, args)
+	return self.timers.proc_int
 end)
 
 -- Function instructions
@@ -967,6 +1030,7 @@ end)
 npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
 	self.timers.instr_timer = nil
 end)
+
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -1190,23 +1254,75 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 end)
 
 npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
+	minetest.log("Arguments: "..dump(args))
 	local result = false
-	local self_pos = vector.round(self.object:get_pos())
+	local u_self_pos = self.object:get_pos()
+	local self_pos = vector.round(u_self_pos)
 	local trgt_pos = args.target_pos
 	local speed = args.speed or 2
 
 	-- Calculate process timer interval
-	if (speed ~= 2) then
-		self.data.proc[self.process.current.id]["_prev_proc_timer_value"] = self.timers.proc_int
-		self.timers.proc_int = 1/speed
+	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
+	self.timers.proc_int = 1/speed
+
+	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_int"]-- or 0.5
+
+	-- Find path
+	if args.check_end_pos_walkable == true then
+		trgt_pos = _npc.env.node_get_accessing_pos(trgt_pos)
 	end
 
-	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_timer_value"] or 0.5
-
+	-- Correct self pos if NPC is lagging behind
+	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"] 
+	if prev_trgt_pos ~= nil then
+		local dist = vector.distance(prev_trgt_pos, u_self_pos)
+		if (dist > 0.25) then
+			-- Expensive(?) check to see that we are not going backwards
+			-- when correcting position... wonder if it's worth it.
+			-- This checks that the direction from the NPC's position to the
+			-- previous target (from last iteration) is not pointing backwards
+			-- (from the NPC perspective). 
+			--
+			-- local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+			-- local prev_yaw = minetest.dir_to_yaw(prev_dir)
+			-- local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+			-- local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
+			-- local min_yaw = prev_yaw - math.pi/2
+			-- local max_yaw = prev_yaw + math.pi/2
+			--
+			-- if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw) 
+			--    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
+			--	  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+			--	  -- This removes some annoying jumping
+			--	  local trgt_y = prev_trgt_pos.y
+			--	  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+			--	  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+			--	  self_pos = prev_trgt_pos
+			-- end
+			
+			-- Simplified check for the same thing above. This checks that the direction
+			-- is not *exactly* the opposite as the current dir. This *will not* catch
+			-- every single instance of annoying back-jumps, but is a very simple check.
+			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+			
+			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
+				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+				-- This removes some annoying jumping
+				local trgt_y = prev_trgt_pos.y
+				if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+				self_pos = prev_trgt_pos
+			end
+		end
+	end
+	
 	-- Return if target pos is same as start pos
 	if self_pos.x == trgt_pos.x
 		and self_pos.z == trgt_pos.z then
 		minetest.log("Same self pos and target pos")
+		minetest.log("Target pos: "..minetest.pos_to_string(trgt_pos))
+		minetest.log("The original target pos: "..minetest.pos_to_string(args.original_target_pos))
 		-- Stop NPC
 		self.object:set_velocity({x = 0, y = 0, z = 0})
 		-- TODO: Change for a registered animation
@@ -1223,22 +1339,6 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		return true
 	end
 
-	-- Find path
-	if args.check_end_pos_walkable == true then
-		trgt_pos = _npc.env.node_get_accessing_pos(trgt_pos)
-	end
-
-	-- Correct self pos if NPC is lagging behind
-	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"]
-	if prev_trgt_pos ~= nil then
-		local dist = vector.distance(prev_trgt_pos, self_pos)
-		if (dist > 0.25) then
-			-- TODO Check that we are not going backwards?
-			self.object:move_to({x=prev_trgt_pos.x, y=prev_trgt_pos.y, z=prev_trgt_pos.z}, true)
-			self_pos = prev_trgt_pos
-		end
-	end
-
 	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
 	if not path then
 		-- Restore process timer interval
@@ -1248,7 +1348,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		end
 		return nil
 	end
-
+	
 	-- Move towards position
 	local next_node = path[1]
 	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z then
@@ -1262,26 +1362,38 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	-- Store next target pos for position correction
 	self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
+	self.data.proc[self.process.current.id]["_prev_trgt_dir"] = dir
 
 	-- Rotate towards next node
 	self.object:set_yaw(yaw)
 
+	-- Diagonal movement speed must be increased
+	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
+	local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
+
+	self.object:set_velocity(vel)
+	self.object:set_animation({
+	    x = npc.ANIMATION_WALK_START,
+	    y = npc.ANIMATION_WALK_END},
+	    30, 0)
+
 	-- Check the type of the next position
 	-- If walkable, just walk
-	if next_node.type == npc.pathfinder.node_types.walkable then
-		-- Diagonal movement speed must be increased
-		if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
-		local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
-
-		self.object:set_velocity(vel)
-		self.object:set_animation({
-		    x = npc.ANIMATION_WALK_START,
-		    y = npc.ANIMATION_WALK_END},
-		    30, 0)
+	--if next_node.type == npc.pathfinder.node_types.walkable then
+		
 
 	-- If openable, check the state. If it's open, NPC will close. If it's closed,
 	-- NPC will open and close.
-	elseif next_node.type == npc.pathfinder.node_types.openable then
+	if next_node.type == npc.pathfinder.node_types.openable then
+
+--		if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
+--		local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
+
+--		self.object:set_velocity(vel)
+--		self.object:set_animation({
+--		    x = npc.ANIMATION_WALK_START,
+--		    y = npc.ANIMATION_WALK_END},
+--		    30, 0)
 
 		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
 		if (is_open ~= nil) then
@@ -1306,7 +1418,6 @@ end)
 -----------------------------------------------------------------------------------
 npc.proc.execute_program = function(self, name, args)
 	-- Enqueue process - this is a priority enqueue
-	--minetest.log("Queue before: "..dump(self.process))
 	local tail = self.process.queue_tail
 	local head = self.process.queue_head
 	if self.process.queue_tail < self.process.queue_head then
@@ -1314,12 +1425,8 @@ npc.proc.execute_program = function(self, name, args)
 		head = self.process.queue_tail
 	end
 	for i = tail + 1, head + 1, -1 do
-		-- minetest.log("Setting at ("..dump(i).."):"..dump(self.process.queue[i]))
-		-- minetest.log("Garbage    ("..dump(i).."):"..dump(self.process.queue[i-1]))
 		self.process.queue[i] = self.process.queue[i - 1]
 	end
-
-	--minetest.log("Queue after 1: "..dump(self.process))
 
 	self.process.queue_tail = self.process.queue_tail + 1
 	self.process.queue[self.process.queue_head] = {
@@ -1329,14 +1436,10 @@ npc.proc.execute_program = function(self, name, args)
 		instruction = 1--program_table[name].initial_instruction
 	}
 
-	--minetest.log("Queue after 2: "..dump(self.process))
-
-
-
+	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
 
 	self.process.current = self.process.queue[self.process.queue_head]
-	--minetest.log("Queue after 3: "..dump(self.process))
 end
 
 npc.proc.enqueue_program = function(self, name, args)
@@ -1349,10 +1452,8 @@ npc.proc.enqueue_program = function(self, name, args)
 		instruction = 1--program_table[name].initial_instruction
 	}
 
+	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
-
-	--self.process.current = self.process.queue[self.process.queue_head]
-
 end
 
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
@@ -1388,6 +1489,7 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		or name == "npc:var:set"
 		or name == "npc:timer:instr:start"
 		or name == "npc:timer:instr:stop"
+		or name == "npc:get_proc_interval"
 		or env_si ~= nil then
 
 		-- Execute next instruction now if possible
@@ -1397,6 +1499,7 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		if instruction then
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
         end
+       
 	end
 end
 
@@ -1409,6 +1512,7 @@ npc.proc.enqueue_process = function(self, name, args)
 		instruction = program_table[name].initial_instruction
 	}
 
+	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
 
 	local next_tail = (self.process.queue_tail + 1) % 100
@@ -1422,10 +1526,19 @@ npc.proc.enqueue_process = function(self, name, args)
 	end
 end
 
-npc.proc.set_state_process = function(self, name, args)
+npc.proc.set_state_process = function(self, name, args, clear_queue)
 	self.process.state.id = self.process.key
 	self.process.state.name = name
 	self.process.state.args = args
+	
+	if (clear_queue == true) then
+		self.process.queue_head = 1
+		self.process.queue_tail = 1
+		self.process.queue = {}
+	end
+	
+	-- TODO: Key is 100, but queue_head = 1. It happened.
+	self.process.key = (self.process.key + 1) % 100
 end
 
 -----------------------------------------------------------------------------------
@@ -1498,7 +1611,8 @@ npc.proc.register_program("builtin:walk_to_pos", {
 		value = false
 	}},
 	{key = "end_pos", name = "npc:env:node:get_accessing_pos", args = {
-		pos = "@args.end_pos"
+		pos = "@args.end_pos",
+		force = "@args.force_accessing_node"
 	}},
 	{name = "npc:while", args = {
 		expr = {
@@ -1676,6 +1790,10 @@ npc.proc.register_operable_node("doors:door_wood_b", {"openable", "doors"},
 -----------------------------------------------------------------------------------
 npc.do_step = function(self, dtime)
 
+	-------------------------------------------------------------------------------
+	-- Timers
+	-- Increment timers and gets basic environmental information
+	-------------------------------------------------------------------------------
 	self.timers.node_below_value = self.timers.node_below_value + dtime
 	self.timers.objects_value = self.timers.objects_value + dtime
 	self.timers.proc_value = self.timers.proc_value + dtime
@@ -1689,8 +1807,22 @@ npc.do_step = function(self, dtime)
 	if (self.timers.objects_value > self.timers.objects_int) then
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
-
-	-- Process queue
+	
+	-------------------------------------------------------------------------------
+	-- Schedule functionality
+	-- Builds a queue of schedules to be executed on a 
+	-- Check all entries in the schedule. Execute all where:
+	--   earliest_start_time <= current_time <= latest_start_time
+	-------------------------------------------------------------------------------
+	--TODO: DO
+	-- Get current time
+	--local current_time = 24000 * minetest.get_timeofday()
+	--if (current_time <= 500)
+	
+	
+	-------------------------------------------------------------------------------
+	-- Process functionality
+	-------------------------------------------------------------------------------
 	if (self.timers.proc_value > self.timers.proc_int) then
 		self.timers.proc_value = 0
 
@@ -1739,17 +1871,16 @@ npc.do_step = function(self, dtime)
 					self.process.current.instruction =
 						program_table[self.process.current.name].initial_instruction
 				else
-					--minetest.log("Current process: "..dump(self.process))
 					-- No more instructions, deque process
 					local next_head = (self.process.queue_head + 1) % 100
 					if next_head == 0 then next_head = 1 end
 					self.process.queue[self.process.queue_head] = nil
 					self.process.current.name = nil
 					self.process.current.instruction = -1
-					-- Check if there's a next process
-					--if self.process.queue[next_head] ~= nil then
-						self.process.queue_head = next_head
-					--end
+					self.process.queue_head = next_head
+					-- Clear memory of the dequed process
+					-- TODO: Might be poisonus?
+					self.data.proc[self.process.current.id] = nil
 				end
 				-- minetest.log("Condition: "..dump(self.process.queue_tail)..", "..dump(self.process.queue_head))
 				-- minetest.log("Condition: "..dump(self.process.queue))
@@ -1796,12 +1927,10 @@ npc.do_step = function(self, dtime)
 			local instruction =
 				program_table[self.process.current.name].instructions[self.process.current.instruction]
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
-            minetest.log("Next 2")
-			--if instruction.name ~= "npc:execute" and instruction.name ~= "npc:set_state_process" then
+            --minetest.log("Next 2")
             if _npc.program_changed == false then
                 self.process.current.instruction = self.process.current.instruction + 1
             else _npc.program_changed = false end
-            --end
 		end
 	end
 
@@ -1852,12 +1981,11 @@ npc.on_activate = function(self, staticdata)
 			env = {},
 			global = {},
 			proc = {},
-			temp = {}
+			temp = {},
+			schedule = {}
 		}
 
 		self.data.env.view_range = 12
-
-		self.schedule = {}
 
 		self.state = {
 			walk = {

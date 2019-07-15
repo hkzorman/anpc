@@ -9,8 +9,11 @@ npc.proc.register_instruction("vegetarian:get_hunger", function(self, args)
 end)
 
 npc.proc.register_instruction("vegetarian:dig", function(self, args)
-    local pos = args.pos
-    minetest.dig_node(pos)
+	local pos = args.pos
+    if pos then
+    	minetest.log("Digging at: "..minetest.pos_to_string(pos))
+    	minetest.dig_node(pos)
+   	end
 end)
 
 npc.proc.register_program("vegetarian:init", {
@@ -21,14 +24,14 @@ npc.proc.register_program("vegetarian:idle", {
 	{name = "npc:move:stand"},
     {name = "vegetarian:set_hunger", args = {
         value = function(self, args)
-            return self.data.global.hunger + 1
+            return self.data.global.hunger + 2
         end
     }},
     {name = "npc:if", args = {
         expr = {
             left = "@global.hunger",
             op   = ">=",
-            right = 180
+            right = 60
         },
         true_instructions = {
             {name = "npc:set_state_process", args = {
@@ -75,7 +78,7 @@ npc.proc.register_program("vegetarian:idle", {
 					return false
 				end,
 				true_instructions = {
-					{name = "npc:while", args = {time = 5, loop_instructions = {
+					{name = "npc:while", args = {time = "@random.15.30", loop_instructions = {
 						{name = "npc:move:rotate", args={
 							target_pos = function(self, args)
 								local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
@@ -86,6 +89,21 @@ npc.proc.register_program("vegetarian:idle", {
 						}},
 					}},
 					{name = "npc:break"}}
+				},
+				false_instructions = {
+					{name = "npc:if", args = {
+						expr = {
+							left  = "@random.1.10",
+							op    = "<=",
+							right = 2 
+						},
+						true_instructions = {
+							{name = "npc:move:walk", args = {
+								cardinal_dir = "@random.1.7"
+							}},
+							{name = "npc:move:stand"}
+						}
+					}}
 				}}}
 		}}}
 })
@@ -115,7 +133,8 @@ npc.proc.register_program("vegetarian:feed", {
 			{name = "npc:execute", args = {
 				name = "builtin:walk_to_pos",
 				args = {
-					end_pos = "@local.chosen_node"
+					end_pos = "@local.chosen_node",
+					force_accessing_node = true
 				}
 			}},
             {name = "vegetarian:dig", args = {
@@ -123,7 +142,7 @@ npc.proc.register_program("vegetarian:feed", {
             }},
             {name = "vegetarian:set_hunger", args = {
                 value = function(self, args)
-                    return self.data.global.hunger - 32
+                    return self.data.global.hunger - 10
                 end
             }},
             {name = "npc:if", args = {
@@ -185,7 +204,7 @@ npc.proc.register_program("vegetarian:sleep", {
                     {name = "npc:wait", args = {time = 30}}
                 }
             }},
-            {name = "vegetarian:set_hunger", args = {value = 300}},
+            {name = "vegetarian:set_hunger", args = {value = 60}},
             {name = "npc:set_state_process", args = {
                 name = "vegetarian:idle",
                 args = {
@@ -261,6 +280,18 @@ minetest.register_craftitem("anpc:vegetarian_npc_spawner", {
 			})
 		else
 			minetest.remove_entity(entity)
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:vegetarian_feed", {
+	description = "Feeder",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			--local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
+			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "vegetarian:feed", {})
+			--minetest.log(dump(pointed_thing.ref:get_luaentity()))
 		end
 	end
 })
