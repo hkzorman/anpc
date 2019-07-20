@@ -1,4 +1,5 @@
 npc = {
+	model    = {},
 	proc     = {},
 	env      = {},
 	schedule = {}

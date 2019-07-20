@@ -1,11 +1,14 @@
 
 
 local _npc = {
-	dsl = {},
-	proc = {},
-	env = {},
-	move = {}
+	dsl   = {},
+	proc  = {},
+	env   = {},
+	move  = {},
+	model = {}
 }
+
+npc.model = _npc.model
 
 npc.ANIMATION_STAND_START = 0
 npc.ANIMATION_STAND_END = 79
@@ -21,10 +24,10 @@ npc.ANIMATION_MINE_END =198
 local program_table = {}
 local instruction_table = {}
 local node_table = {}
-local animation_table = {}
 
 local programs = {}
 local instructions = {}
+local models = {}
 
 -----------------------------------------------------------------------------------
 -- DSL Functions
@@ -293,8 +296,13 @@ _npc.env.node_find = function(self, args)
 	local min_pos = args.min_pos
 	local max_pos = args.max_pos
 
+	if (not min_pos) and (not max_pos) and (args.matches == "single") then
+		local result = minetest.find_node_near(start_pos, radius, args.nodenames)
+		return result
+	end
+	
 	-- Calculate area if just radius given
-	if (not min_pos) and (not max_pos) then
+	if (not min_pos) and (not max_pos) and (not args.matches or args.matches == "many") then
 		local y_radius = args.y_radius or radius
 		local y_offset = args.y_offset or 0
 		min_pos = {x=start_pos.x - radius, y=(start_pos.y + y_offset) - y_radius, z=start_pos.z - radius}
@@ -387,6 +395,39 @@ end
 
 _npc.env.node_store_remove = function(self, args)
 
+end
+
+_npc.model.set_animation = function(self, args)
+
+	assert(args.name or args.name == "", "Argument 'name' cannot be nil or empty.")
+	local model = models[self.object:get_properties().mesh]
+	if not model then return false end
+	if not model.animations[args.name] then return false end
+	
+	local animation = model.animations[args.name]
+	local loop = animation.loop
+	local speed = args.speed or animation.speed or 30
+	if (loop == nil) then loop = true end
+	self.object:set_animation(
+        {
+            x = animation.start_frame, 
+            y = animation.end_frame
+        },
+        speed,
+        animation.blend or 0,
+        loop
+    )
+    
+    if ((args.animation_after or animation.animation_after) and loop == false) then
+    	minetest.after(
+    		(animation.end_frame - animation.start_frame) / animation.speed, 
+    		_npc.model.set_animation, 
+    		self, {
+    			name = args.animation_after or animation.animation_after
+    		})
+    end
+    
+    return true
 end
 
 -----------------------------------------------------------------------------------
@@ -866,7 +907,16 @@ npc.proc.register_instruction = function(name, instruction)
 	end
 end
 
-npc.proc.register_operable_node = function(name, categories, properties, operation)
+-- Parameters:
+-- name: Name of the node, same as when the node is registered with 'minetest.register_node'
+-- categories: Array of tags or categories, that classifies nodes together
+-- properties: An array of functions in the following format:
+--   {
+--		[property_name] = function(self, args)
+--   }
+-- operation: A function that is called when the instruction 'npc:env:node:operate' is executed
+-- the function is given two parameters: 'self', and a table of arguments 'args'
+npc.env.register_operable_node = function(name, categories, properties, operation)
 	if node_table[name] ~= nil then
 		return false
 	else
@@ -879,11 +929,28 @@ npc.proc.register_operable_node = function(name, categories, properties, operati
 	end
 end
 
---TODO: Implement
-npc.register_model_animation = function(name, animation_table)
-	--if animation_table[name] ~=
+-- Parameters:
+-- The "animation_name" parameter is the name of the animation
+-- The object "animation_params" is like this:
+-- {
+--		start_frame: integer, required, the starting frame of the animation of the blender model
+--		end_frame: integer, required, the ending frame of the animation of the blender model
+--		speed: integer, required, the speed in which the animation will be played
+--		blend: integer, optional, animation blend is broken, defaults to 0
+--		loop: boolean, optional, default is true. If false, should specify "animation_after"
+--		animation_after: string, optional, default is "stand". Name of animation that will be played
+--   			  		  when this animation is over.
+-- }
+npc.model.register_animation = function(model_name, animation_name, animation_params)
+	-- Initialize if not present
+	if (not models[model_name]) then 
+		models[model_name] = {
+			animations = {}
+		}
+	end
+	
+	models[model_name].animations[animation_name] = animation_params
 end
-
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -1118,6 +1185,15 @@ npc.proc.register_instruction("npc:env:node:place", function(self, args)
     end
 end)
 
+npc.proc.register_instruction("npc:env:node:dig", function(self, args)
+	local pos = args.pos
+    if pos then
+    	minetest.log("Digging at: "..minetest.pos_to_string(pos))
+    	_npc.model.set_animation(self, {name = "mine_once"})
+    	minetest.dig_node(pos)
+   	end
+end)
+
 --TODO: Add calculation for surrounding air nodes if node is walkable
 npc.proc.register_instruction("npc:env:find_path", function(self, args)
 
@@ -1169,23 +1245,23 @@ npc.proc.register_instruction("npc:env:prioritize", function(self, args)
 	end
 end)
 
+npc.proc.register_instruction("npc:model:set_animation", _npc.model.set_animation)
+
 -----------------------------------------------------------------------------------
 -- Movement instructions
 -----------------------------------------------------------------------------------
-
-_npc.move.set_animation = function(self, args)
-	--local animation_name =
-end
 
 npc.proc.register_instruction("npc:move:set_animation",
 	_npc.move.set_animation)
 
 npc.proc.register_instruction("npc:move:stand", function(self, args)
 	self.object:set_velocity({x=0, y=0, z=0})
-	self.object:set_animation({
-        x = npc.ANIMATION_STAND_START,
-        y = npc.ANIMATION_STAND_END},
-        30, 0)
+	-- TODO: Check if animation is registered
+	_npc.model.set_animation(self, {name = "stand"})
+--	self.object:set_animation({
+--        x = npc.ANIMATION_STAND_START,
+--        y = npc.ANIMATION_STAND_END},
+--        30, 0)
 end)
 
 npc.proc.register_instruction("npc:move:rotate", function(self, args)
@@ -1196,7 +1272,7 @@ npc.proc.register_instruction("npc:move:rotate", function(self, args)
 	self.object:set_yaw(yaw)
 end)
 
-npc.proc.register_instruction("npc:move:move_to", function(self, args)
+npc.proc.register_instruction("npc:move:to_pos", function(self, args)
 	self.object:move_to(args.pos, true)
 end)
 
@@ -1247,10 +1323,11 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 
 	self.object:set_yaw(yaw)
 	self.object:set_velocity(velocity)
-	self.object:set_animation({
-        x = npc.ANIMATION_WALK_START,
-        y = npc.ANIMATION_WALK_END},
-        30, 0)
+	_npc.model.set_animation(self, {name = "walk", speed = 30})
+--	self.object:set_animation({
+--        x = npc.ANIMATION_WALK_START,
+--        y = npc.ANIMATION_WALK_END},
+--        30, 0)
 end)
 
 npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
@@ -1325,11 +1402,12 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		minetest.log("The original target pos: "..minetest.pos_to_string(args.original_target_pos))
 		-- Stop NPC
 		self.object:set_velocity({x = 0, y = 0, z = 0})
-		-- TODO: Change for a registered animation
-		self.object:set_animation({
-		    x = npc.ANIMATION_STAND_START,
-		    y = npc.ANIMATION_STAND_END},
-		    30, 0)
+		-- TODO: Check if animation exists?
+		_npc.model.set_animation(self, {name = "stand"})
+--		self.object:set_animation({
+--		    x = npc.ANIMATION_STAND_START,
+--		    y = npc.ANIMATION_STAND_END},
+--		    30, 0)
 		if args.original_target_pos and
 			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
 			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
@@ -1372,10 +1450,11 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
 
 	self.object:set_velocity(vel)
-	self.object:set_animation({
-	    x = npc.ANIMATION_WALK_START,
-	    y = npc.ANIMATION_WALK_END},
-	    30, 0)
+	_npc.model.set_animation(self, {name = "walk", speed = 30})
+--	self.object:set_animation({
+--	    x = npc.ANIMATION_WALK_START,
+--	    y = npc.ANIMATION_WALK_END},
+--	    30, 0)
 
 	-- Check the type of the next position
 	-- If walkable, just walk
@@ -1759,7 +1838,7 @@ npc.proc.register_program("builtin:node_query", {
 -- Node registrations
 -----------------------------------------------------------------------------------
 
-npc.proc.register_operable_node("doors:door_wood_a", {"openable", "doors"},
+npc.env.register_operable_node("doors:door_wood_a", {"openable", "doors"},
 	{["is_open"] = function(self, args)
 		return false
 	end},
@@ -1771,7 +1850,7 @@ npc.proc.register_operable_node("doors:door_wood_a", {"openable", "doors"},
 		minetest.registered_nodes["doors:door_wood_a"].on_rightclick(args.pos, node, clicker, nil, nil)
 	end)
 
-npc.proc.register_operable_node("doors:door_wood_b", {"openable", "doors"},
+npc.env.register_operable_node("doors:door_wood_b", {"openable", "doors"},
 	{["is_open"] = function(self, args)
 		return true
 	end},

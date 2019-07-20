@@ -1,19 +1,61 @@
 -- A sample NPC
 
+-- Animations
+npc.model.register_animation("character_anpc.b3d", "stand", {
+	start_frame = 0,
+	end_frame = 79,
+	speed = 30,
+	loop = true
+})
+
+npc.model.register_animation("character_anpc.b3d", "lay", {
+	start_frame = 162,
+	end_frame = 166,
+	loop = true
+})
+
+npc.model.register_animation("character_anpc.b3d", "walk", {
+	start_frame = 168,
+	end_frame = 187,
+	loop = true
+})
+
+npc.model.register_animation("character_anpc.b3d", "mine_once", {
+	start_frame = 192,
+	end_frame = 196,
+	speed = 15,
+	loop = false,
+	animation_after = "stand"
+})
+
+-- Nodes
+npc.env.register_operable_node("beds:bed_bottom", 
+	{"bed"}, 
+	{}, 
+	function(self, args)
+		local pos = args.pos
+		local node = minetest.get_node_or_nil(pos)
+		if (not node) then return end
+		local dir = minetest.facedir_to_dir(node.param2)
+		-- Calculate bed_pos
+		local bed_pos = {
+			x = pos.x + dir.x / 2, 
+			y = pos.y,
+			z = pos.z + dir.z / 2
+		}
+		-- Move to position
+		self.object:move_to(bed_pos)
+		self.object:set_yaw(minetest.dir_to_yaw(minetest.facedir_to_dir((node.param2 + 2) % 4)))
+		-- Set animation
+		npc.model.set_animation(self, {name = "lay"})
+	end)
+
 npc.proc.register_instruction("vegetarian:set_hunger", function(self, args)
     self.data.global.hunger = args.value
 end)
 
 npc.proc.register_instruction("vegetarian:get_hunger", function(self, args)
     return self.data.global.hunger
-end)
-
-npc.proc.register_instruction("vegetarian:dig", function(self, args)
-	local pos = args.pos
-    if pos then
-    	minetest.log("Digging at: "..minetest.pos_to_string(pos))
-    	minetest.dig_node(pos)
-   	end
 end)
 
 npc.proc.register_program("vegetarian:init", {
@@ -123,8 +165,6 @@ npc.proc.register_program("vegetarian:feed", {
                 key = "chosen_node",
                 value = function(self, args)
 					-- Choose a random pos
-                    -- minetest.log("Nodes: ".dump(self.data.proc[self.process.current.id].nodes[index]))
-                    -- minetest.log("Index: ")
 					local index = math.random(1, #self.data.proc[self.process.current.id].nodes)
 					local result = self.data.proc[self.process.current.id].nodes[index]
                     return result
@@ -137,7 +177,7 @@ npc.proc.register_program("vegetarian:feed", {
 					force_accessing_node = true
 				}
 			}},
-            {name = "vegetarian:dig", args = {
+            {name = "npc:env:node:dig", args = {
                 pos = "@local.chosen_node"
             }},
             {name = "vegetarian:set_hunger", args = {
@@ -176,24 +216,25 @@ npc.proc.register_program("vegetarian:feed", {
 -- Sleep program
 npc.proc.register_program("vegetarian:sleep", {
     {key = "bed_pos", name = "npc:env:node:find", args = {
+        matches = "single",
         radius = 35,
         nodenames = {"beds:bed_bottom"}
     }},
     {name = "npc:if", args = {
-        expr = function(self, args)
-            minetest.log("Self: "..dump(self))
-            return #self.data.proc[self.process.current.id].bed_pos > 0
-        end,
+        expr = {
+        	left  = "@local.bed_pos",
+        	op    = "~=",
+        	right = nil
+        },
         true_instructions = {
             {name = "npc:execute", args = {
                 name = "builtin:walk_to_pos",
                 args = {
-                end_pos = function(self, args)
-                        local index = math.random(1, #self.data.proc[self.process.current.id].bed_pos)
-                        minetest.log("Walking to: "..dump(self.data.proc[self.process.current.id].bed_pos[index]))
-                        return self.data.proc[self.process.current.id].bed_pos[index]
-                    end
+                	end_pos = "@local.bed_pos"
                 }
+            }},
+            {name = "npc:env:node:operate", args = {
+            	pos = "@local.bed_pos"
             }},
             {name = "npc:while", args = {
                 expr = function(self, args)
