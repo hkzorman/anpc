@@ -268,6 +268,7 @@ minetest.register_entity("anpc:vegetarian_npc", {
 	},
 	visual_size = {x = 1, y = 1, z = 1},
 	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
+	stepheight = 0.6,
 	--collisionbox = {-0.6,-0.6,-0.6, 0.6,0.6,0.6},
 	physical = true,
 	on_activate = npc.on_activate,
@@ -330,9 +331,119 @@ minetest.register_craftitem("anpc:vegetarian_feed", {
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		if pointed_thing.type == "object" then
-			--local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
-			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "vegetarian:feed", {})
+			local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:grass_1", "default:grass_2", "default:grass_3", "default:grass_4", "default:grass_5"})
+			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "builtin:walk_to_pos", {end_pos = target_pos})
 			--minetest.log(dump(pointed_thing.ref:get_luaentity()))
+		end
+	end
+})
+
+minetest.register_entity("anpc:vegetarian_npc2", {
+	hp_max = 1,
+	visual = "mesh",
+	mesh = "character_anpc.b3d",
+	textures = {
+		"default_male.png",
+	},
+	visual_size = {x = 1, y = 1, z = 1},
+	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
+	stepheight = 0.6,
+	physical = true,
+	on_step = function(self, dtime)
+		if (self.is_jumping == true) then
+			self.timer = self.timer + dtime
+			local vel = self.object:get_velocity()
+			if (vel.y == 0) then
+				self.object:set_velocity({x=0, y=0, z=0})
+				self.is_jumping = false
+				minetest.log("Landed in: "..dump(self.timer))
+			end
+		end
+		if (self.is_dropping == true) then
+			local vel = self.object:get_velocity()
+			if vel.y == 0 and self.is_falling == true then
+				self.is_dropping = false
+				self.object:set_velocity({x=0, y=0, z=0})
+				minetest.log("Landed")
+			elseif vel.y < 0 and self.is_falling == false then
+				self.is_falling = true
+				minetest.log("Started falling")
+			end
+		end
+	end,
+	on_rightclick = function(self, puncher)
+		minetest.log(dump(self))
+	end
+})
+
+-- Spawner item
+minetest.register_craftitem("anpc:vegetarian_npc_spawner2", {
+	description = "Vegetarian Spawner 2",
+	inventory_image = "default_glass.png",
+	on_use = function(itemstack, user, pointed_thing)
+		local spawn_pos = minetest.pointed_thing_to_face_pos(user, pointed_thing)
+		spawn_pos.y = spawn_pos.y
+		local entity = minetest.add_entity(spawn_pos, "anpc:vegetarian_npc2")
+		if entity then
+            entity:set_acceleration({x=0, y=-10, z=0})
+		else
+			minetest.remove_entity(entity)
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:vegetarian_jump", {
+	description = "Jumper",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			local entity = pointed_thing.ref:get_luaentity()
+			local dir = {x=1, y=0, z=0}
+			local range = 1
+			
+			local self_pos = vector.round(entity.object:get_pos())
+			local next_pos_front = {x = self_pos.x, y = self_pos.y, z = self_pos.z + 1}
+			local next_pos_below = {x = self_pos.x, y = self_pos.y - 1, z = self_pos.z + 1}
+			local next_y_diff = 0
+			
+			local next_nod = minetest.get_node(next_pos_front)
+			if (next_nod.name ~= "air" and minetest.registered_nodes[next_nod.name].walkable == true) then
+				next_y_diff = 1
+				range = 2
+			else
+				next_nod = minetest.get_node(next_pos_below)
+				if (next_nod.name == "air") then 
+					range = 0.5
+					next_y_diff = -1
+				end
+			end
+			
+			local mid_point = (entity.collisionbox[5] - entity.collisionbox[2]) / 2
+			
+			-- Based on range, doesn't takes time into account
+			local y_speed = math.sqrt ( (10 * range) / (math.sin(2 * (math.pi / 3))) ) + mid_point
+			entity.is_jumping = true
+			if (next_y_diff == -1) then y_speed = 0 end
+			local x_speed = 1
+			if (next_y_diff == -1) then
+				x_speed = 1 / (math.sqrt( (2 + mid_point) / (10) ))
+				entity.is_dropping = true
+				entity.is_jumping = false
+				entity.is_falling = false
+			end
+--			local initial_y = self_pos.y + mid_point
+--			local target_y  = self_pos.y + mid_point + next_y_diff
+--			local y_speed = target_y + 5 - initial_y 
+			
+			minetest.log("This is y_speed: "..dump(y_speed))
+			minetest.log("This is x speed: "..dump(x_speed))
+			
+			
+			entity.object:set_pos(vector.round(entity.object:get_pos()))
+			local vel = {x=0, y=y_speed, z=x_speed}
+			entity.object:set_velocity(vel)
+			entity.timer = 0
+			
 		end
 	end
 })

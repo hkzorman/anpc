@@ -289,12 +289,24 @@ _npc.env.node_get_accessing_pos = function(_, args)
 	return nil
 end
 
+-- Find nodes within a given radius or areas
+-- 
 _npc.env.node_find = function(self, args)
 
 	local start_pos = args.pos or vector.round(self.object:get_pos())
 	local radius = args.radius or self.data.env.view_range
 	local min_pos = args.min_pos
 	local max_pos = args.max_pos
+	
+	-- Calculate node names if categories are given
+	local nodenames = args.nodenames or {}
+	if (args.categories) then
+		for _, nodes in pairs() do
+			for i = 1, #args.categories do
+				
+			end
+		end
+	end
 
 	if (not min_pos) and (not max_pos) and (args.matches == "single") then
 		local result = minetest.find_node_near(start_pos, radius, args.nodenames)
@@ -1350,9 +1362,15 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	end
 
 	-- Correct self pos if NPC is lagging behind
+	minetest.log("Before correction pos: "..minetest.pos_to_string(self.object:get_pos()))
 	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"] 
 	if prev_trgt_pos ~= nil then
+--		local x_dist = math.abs(prev_trgt_pos.x - u_self_pos.x)
+--		local y_dist = math.abs(prev_trgt_pos.y - u_self_pos.y)
+--		local z_dist = math.abs(prev_trgt_pos.z - u_self_pos.z)
 		local dist = vector.distance(prev_trgt_pos, u_self_pos)
+		minetest.log("Distances: x: "..dump(x_dist)..", y: "..dump(y_dist)..", z: "..dump(z_dist))
+--		if ((x_dist + z_dist) > 0.25) then
 		if (dist > 0.25) then
 			-- Expensive(?) check to see that we are not going backwards
 			-- when correcting position... wonder if it's worth it.
@@ -1360,37 +1378,37 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 			-- previous target (from last iteration) is not pointing backwards
 			-- (from the NPC perspective). 
 			--
-			-- local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
-			-- local prev_yaw = minetest.dir_to_yaw(prev_dir)
-			-- local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
-			-- local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
-			-- local min_yaw = prev_yaw - math.pi/2
-			-- local max_yaw = prev_yaw + math.pi/2
-			--
-			-- if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw) 
-			--    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
-			--	  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
-			--	  -- This removes some annoying jumping
-			--	  local trgt_y = prev_trgt_pos.y
-			--	  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
-			--	  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
-			--	  self_pos = prev_trgt_pos
-			-- end
+			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+			 local prev_yaw = minetest.dir_to_yaw(prev_dir)
+			 local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+			 local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
+			 local min_yaw = prev_yaw - math.pi/2
+			 local max_yaw = prev_yaw + math.pi/2
+			
+			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw) 
+			    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
+				  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+				  -- This removes some annoying jumping
+				  local trgt_y = prev_trgt_pos.y
+				  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+				  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+				  self_pos = prev_trgt_pos
+			 end
 			
 			-- Simplified check for the same thing above. This checks that the direction
 			-- is not *exactly* the opposite as the current dir. This *will not* catch
 			-- every single instance of annoying back-jumps, but is a very simple check.
-			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
-			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
-			
-			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
-				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
-				-- This removes some annoying jumping
-				local trgt_y = prev_trgt_pos.y
-				if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
-				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
-				self_pos = prev_trgt_pos
-			end
+--			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+--			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+--			
+--			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
+--				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(u_self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+--				-- This removes some annoying jumping
+--				local trgt_y = prev_trgt_pos.y
+--				--if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+--				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+--				self_pos = prev_trgt_pos
+--			end
 		end
 	end
 	
@@ -1404,10 +1422,6 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		self.object:set_velocity({x = 0, y = 0, z = 0})
 		-- TODO: Check if animation exists?
 		_npc.model.set_animation(self, {name = "stand"})
---		self.object:set_animation({
---		    x = npc.ANIMATION_STAND_START,
---		    y = npc.ANIMATION_STAND_END},
---		    30, 0)
 		if args.original_target_pos and
 			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
 			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
@@ -1447,32 +1461,33 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	-- Diagonal movement speed must be increased
 	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
-	local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
+	
+	-- Do jump
+	minetest.log("Diff: "..minetest.pos_to_string(u_self_pos))
+	minetest.log("Diff: "..minetest.pos_to_string(next_pos))
+	if (next_pos.y >= u_self_pos.y + 1.5) then
+		minetest.log("Start pos: "..minetest.pos_to_string(self.object:get_pos()))
+		self.object:set_velocity({x=0, y=5, z=0})
+		minetest.after(0.3, function(self, dir)
+			minetest.log("First correction")
+			self.object:set_velocity(vector.multiply({x=dir.x, y=0, z=dir.z}, 4))
+			minetest.log("After pos: "..minetest.pos_to_string(self.object:get_pos()))
+		end, self, dir)
+		minetest.after(0.5, function(self)
+			minetest.log("Second correction")
+			self.object:set_velocity({x=0, y=0, z=0}) 
+			minetest.log("After pos: "..minetest.pos_to_string(self.object:get_pos()))
+		end, self)
+	else
+		local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
 
-	self.object:set_velocity(vel)
-	_npc.model.set_animation(self, {name = "walk", speed = 30})
---	self.object:set_animation({
---	    x = npc.ANIMATION_WALK_START,
---	    y = npc.ANIMATION_WALK_END},
---	    30, 0)
-
-	-- Check the type of the next position
-	-- If walkable, just walk
-	--if next_node.type == npc.pathfinder.node_types.walkable then
-		
+		self.object:set_velocity(vel)
+		_npc.model.set_animation(self, {name = "walk", speed = 30})
+	end
 
 	-- If openable, check the state. If it's open, NPC will close. If it's closed,
 	-- NPC will open and close.
 	if next_node.type == npc.pathfinder.node_types.openable then
-
---		if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
---		local vel = vector.multiply({x=dir.x, y=0, z=dir.z}, speed)
-
---		self.object:set_velocity(vel)
---		self.object:set_animation({
---		    x = npc.ANIMATION_WALK_START,
---		    y = npc.ANIMATION_WALK_END},
---		    30, 0)
 
 		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
 		if (is_open ~= nil) then
