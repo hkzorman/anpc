@@ -290,6 +290,60 @@ _npc.env.node_get_accessing_pos = function(_, args)
 	return nil
 end
 
+-- This function is logically opposite to the 'walkable' parameter of a node.
+-- In a node, if it is walkable, means that an entity can step *on* it. If not,
+-- then an entity can step *through* it (like grass). This functon returns true
+-- with nodes like air, grass and stairs.
+_npc.env.node_is_walkable = function(self, args)
+	local node = minetest.get_node_or_nil(args.pos)
+	if (node and node.name 
+		and (
+			minetest.registered_nodes[node.name].walkable == false
+			or minetest.get_item_group(next_node_below.name, "stair") > 0
+			or minetest.get_item_group(next_node_below.name, "slab") > 0
+		)) then
+		return true	
+	end
+	return false
+end
+
+_npc.env.node_can_jump_to = function(self, args)
+	local pos = args.pos
+	if (vector.round(self.object:get_pos()).y + self.data.env.max_jump_height >= pos.y) then
+		-- Can jump, let's see now if we have clearance to land
+		if (args.check_clearance == true) then
+			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
+			for (i = 1, height) do 
+				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
+					return false
+				end	
+			end
+			return true
+		end
+		return true
+	end
+	return false
+end
+
+-- TODO: Implement
+_npc.env.node_can_drop_to = function(self, args)
+	local pos = args.pos
+	if (vector.round(self.object:get_pos()).y + self.data.env.max_jump_height >= pos.y) then
+		-- Can jump, let's see now if we have clearance to land
+		if (args.check_clearance == true) then
+			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
+			for (i = 1, height) do 
+				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
+					return false
+				end	
+			end
+			return true
+		end
+		return true
+	end
+	return false
+end
+
 -- Find nodes within a given radius or areas
 -- 
 _npc.env.node_find = function(self, args)
@@ -1406,16 +1460,33 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	if (args.avoid_obstacles) then
 		-- Check for solid obstacles
 		local obstacle_radius = args.obstacle_detection_radius or 3
-		local obstacle_pos = {
-			x=self_pos.x + (dir.x * obstacle_radius), 
-			y=self_pos.y, 
-			z=self_pos.z + (dir.z * obstacle_radius)}
-		local obstacle_node = minetest.get_node_or_nil(obstacle_pos)
+		local obstacle_pos = {}
+		for i = 2, obstacle_radius + 1 do
+			obstacle_pos.x = self_pos.x + (dir.x * obstacle_radius)
+			obstacle_pos.y = self_pos.y, 
+			obstacle_pos.z = self_pos.z + (dir.z * obstacle_radius)
+			local obstacle_node = minetest.get_node_or_nil(obstacle_pos)
+			
+		end
+		
+		
+		
+		
 		if (obstacle_node and obstacle_node.name 
 			and minetest.registered_nodes[obstacle_node.name].walkable == true) then
 			-- Check nodes above, obstacle may be jumpable
 			if (args.enable_obstacle_jump) then
-			
+				-- TODO: Check all nodes between this and up to NPC's height?
+				local node_above = minetest.get_node_or_nil({
+					x=obstacle_pos.x, 
+					y=obstacle_pos.y + self.data.env.max_jump_height, 
+					z=obstacle_pos.z})
+				if (node_above and node_above.name 
+					and minetest.registered_nodes[node_above].walkable == false) then
+					
+					minetest.log("Jumping to "..minetest.pos_to_string(node_above))
+					_npc.move.jump(self, {target_pos = node_above})
+				end
 			end
 		
 		end
@@ -1774,18 +1845,6 @@ end
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 
--- Stupid program that walks on a square
-npc.proc.register_program("sample:stupid", {
-	{name = "npc:for", args = {
-		initial_value = 0,
-		step_increase = 2,
-		expr = {left="@local.for_index", op="<=", right=6},
-		loop_instructions = {
-			{name = "npc:move:walk", args = {dir = "@local.for_index"}}
-		}
-	}}
-})
-
 npc.proc.register_program("builtin:idle", {
 	{name = "npc:move:stand"},
 	{name = "npc:for", args = {
@@ -1866,57 +1925,6 @@ npc.proc.register_program("builtin:walk_to_pos", {
 		}
 	}}
 })
-
-npc.proc.register_program("sample:stupid")
-
-npc.proc.register_program("sample:stupid_init", {
-	{key = "nodes", name = "npc:env:node:find", args = {
-		radius = "@args.radius",
-		nodenames = "@args.nodes"
-	}},
-	{name = "npc:if", args = {
-		expr = function(self, args)
-			return #self.data.proc[self.process.current.id].nodes > 0
-		end,
-		true_instructions = {
-			{name = "npc:for", args = {
-				initial_value = 1,
-				step_increase = 1,
-				expr = {
-					left = "@local.for_index",
-					op   = "<",
-					right = function(self, args)
-						return #self.data.proc[self.process.current.id].nodes
-					end
-				},
-				loop_instructions = {
-					{key = "is_owned", name = "npc:env:node:is_owner", args = {
-						pos = function(self, args)
-							return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
-						end
-					}},
-					{name = "npc:if", args = {
-						expr = {
-							left = "@local.is_owned",
-							op   = "==",
-							right = nil
-						},
-						true_instructions = {
-							{name = "npc:env:node:set_owned", args = {
-								pos = function(self, args)
-									return self.data.proc[self.process.current.id].nodes[self.data.proc[self.process.current.id].for_index]
-								end,
-								value=true
-							}},
-							{name = "npc:break"}
-						},
-					}}
-				}
-			}}
-		}
-	}}
-})
-
 
 npc.proc.register_program("builtin:node_query_simple", {
 	{key = "nodes", name = "npc:env:node:find", args = {
@@ -2259,7 +2267,11 @@ npc.on_activate = function(self, staticdata)
 			schedule = {}
 		}
 
+		-- These values should be customizable, but these are default
 		self.data.env.view_range = 12
+		local height = self.collisionbox[5] - self.collisionbox[2]
+		self.data.env.max_jump_height = math.ceil(height / 2)
+		self.data.env.max_drop_height = math.ceil(height / 2)
 
 	end
 
@@ -2293,24 +2305,11 @@ npc.get_staticdata = function(self)
 
 end
 
-minetest.register_entity("anpc:npc", {
-	hp_max = 1,
-	visual = "mesh",
-	mesh = "character_anpc.b3d",
-	textures = {
-		"default_male.png",
-	},
-	visual_size = {x = 1, y = 1, z = 1},
-	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
-	--collisionbox = {-0.6,-0.6,-0.6, 0.6,0.6,0.6},
-	physical = true,
-	on_activate = npc.on_activate,
-	get_staticdata = npc.get_staticdata,
-	on_step = npc.do_step,
-	on_punch = function(self, puncher, time_from_last_punch, tool_capabilities, dir)
-		minetest.log(dump(self))
-	end
-})
+
+---------------------------------------------------------------------
+-- WARNING: Below are stuff for testing. Remove from final version
+-- 		    of mod
+---------------------------------------------------------------------
 
 minetest.register_craftitem("anpc:npc_spawner", {
 	description = "Spawner",
