@@ -230,12 +230,32 @@ _npc.env.node_get_property = function(self, args)
 	return nil
 end
 
-_npc.env.node_get_accessing_pos = function(_, args)
+_npc.env.node_get_accessing_pos = function(self, args)
 
 	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
 	minetest.log("Force an accessing node? "..dump(args.force))
 
-	local target_node = minetest.get_node_or_nil(args.pos)
+	-- Make a copy of the given pos
+	local pos = {x=args.pos.x, y=args.pos.y, z=args.pos.z}
+
+	-- Check vertical reach - NPCs should be able to walk to nodes even if
+	-- they are not in the floor, as long as they are within their vertical reach.
+	-- For the moment, the reach is defined as ceil(height) + ceil(height) / 2
+	-- Why? Well, a normal character.b3d model is almost 2 nodes height, and
+	-- with the arms it could theoritically reach the node above him/her/it.
+	-- First, calculate NPC height
+	local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
+	local vertical_reach = height + (height / 2)
+	-- Then check if the node is within the reach
+	local self_pos = vector.round(self.object:get_pos())
+	if (pos.y > self_pos.y && (pos.y - self_pos.y) > vertical_reach) then
+		return args.pos
+	else
+		-- Adjust the position's y for the pathfinder
+		pos.y = self_pos.y
+	end
+
+	local target_node = minetest.get_node_or_nil(pos)
 	if (target_node) then
 		if npc.pathfinder.is_good_node(target_node, {})
 			== npc.pathfinder.node_types.non_walkable or args.force == true then
@@ -244,7 +264,7 @@ _npc.env.node_get_accessing_pos = function(_, args)
 			if (target_node.name
 				and minetest.registered_nodes[target_node.name].paramtype2 == "facedir") then
 
-				local front_pos = vector.add(args.pos, vector.multiply(minetest.facedir_to_dir(target_node.param2), -1))
+				local front_pos = vector.add(pos, vector.multiply(minetest.facedir_to_dir(target_node.param2), -1))
 				local front_node = minetest.get_node_or_nil(front_pos)
 				if front_node then
 					if npc.pathfinder.is_good_node(front_node, {})
@@ -258,34 +278,36 @@ _npc.env.node_get_accessing_pos = function(_, args)
 			local count = 0
 			while count < 4 do
 				-- Create copy of pos
-				local pos = {
-					x = args.pos.x,
-					y = args.pos.y,
-					z = args.pos.z
+				local cpos = {
+					x = pos.x,
+					y = pos.y,
+					z = pos.z
 				}
 				if count == 0 then
-					pos.x = pos.x + 1
+					cpos.x = cpos.x + 1
 				elseif count == 1 then
-					pos.z = pos.z + 1
+					cpos.z = cpos.z + 1
 				elseif count == 2 then
-					pos.x = pos.x -1
+					cpos.x = cpos.x -1
 				elseif count == 3 then
-					pos.z = pos.z -1
+					cpos.z = cpos.z -1
 				end
 
-				local node = minetest.get_node(pos)
+				local node = minetest.get_node(cpos)
 				if node and node.name and minetest.registered_nodes[node.name].walkable == false then
-					minetest.log("Returning this accessing pos: "..minetest.pos_to_string(pos))
-					return pos
+					minetest.log("Returning this accessing pos: "..minetest.pos_to_string(cpos))
+					return cpos
 				end
 				count = count + 1
 			end
 		else
-			return args.pos
+			return pos
 		end
 	end
 
-	return nil
+	-- If no accessible found, then just return the given position.
+	-- The pathfinder should fail to find a path.
+	return args.pos
 end
 
 -- This function is logically opposite to the 'walkable' parameter of a node.
@@ -1452,10 +1474,6 @@ npc.proc.register_instruction("npc:move:stand", function(self, args)
 	self.object:set_velocity({x=0, y=0, z=0})
 	-- TODO: Check if animation is registered
 	_npc.model.set_animation(self, {name = "stand"})
---	self.object:set_animation({
---        x = npc.ANIMATION_STAND_START,
---        y = npc.ANIMATION_STAND_END},
---        30, 0)
 end)
 
 npc.proc.register_instruction("npc:move:rotate", function(self, args)
@@ -1565,6 +1583,9 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 
 	local dir = vector.direction(self_pos, trgt_pos)
 
+	-- WARNING: The below is currently halted.
+	-- 			It is possible this code will not be used anymore.
+	-- 
 	-- Obstacle avoidance: in order to use these instruction in a loop,
 	-- some obstacle avoidance features can be enabled via arguments. In
 	-- general, these are the possible obstacle avoidance:
@@ -1576,47 +1597,44 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	--      turn around in a -90 to 90 degrees. If that fails, the NPC will
 	--      turn 180 degrees around.
 
-	if (args.avoid_obstacles) then
-		-- Check for solid obstacles
-		local obstacle_radius = args.obstacle_detection_radius or 3
-		local obstacle_pos = {}
-		for i = 2, obstacle_radius + 1 do
-			obstacle_pos.x = self_pos.x + (dir.x * obstacle_radius)
-			obstacle_pos.y = self_pos.y,
-			obstacle_pos.z = self_pos.z + (dir.z * obstacle_radius)
-			local obstacle_node = minetest.get_node_or_nil(obstacle_pos)
+--	if (args.avoid_obstacles) then
+--		-- Check for solid obstacles
+--		local obstacle_radius = args.obstacle_detection_radius or 3
+--		local obstacle_pos = {}
+--		for i = 2, obstacle_radius + 1 do
+--			obstacle_pos.x = self_pos.x + (dir.x * obstacle_radius)
+--			obstacle_pos.y = self_pos.y,
+--			obstacle_pos.z = self_pos.z + (dir.z * obstacle_radius)
+--			local obstacle_node = minetest.get_node_or_nil(obstacle_pos)
 
-		end
+--		end
+--
+--		if (obstacle_node and obstacle_node.name
+--			and minetest.registered_nodes[obstacle_node.name].walkable == true) then
+--			-- Check nodes above, obstacle may be jumpable
+--			if (args.enable_obstacle_jump) then
+--				-- TODO: Check all nodes between this and up to NPC's height?
+--				local node_above = minetest.get_node_or_nil({
+--					x=obstacle_pos.x,
+--					y=obstacle_pos.y + self.data.env.max_jump_height,
+--					z=obstacle_pos.z})
+--				if (node_above and node_above.name
+--					and minetest.registered_nodes[node_above].walkable == false) then
 
+--					minetest.log("Jumping to "..minetest.pos_to_string(node_above))
+--					_npc.move.jump(self, {target_pos = node_above})
+--				end
+--			end
 
+--		end
 
-
-		if (obstacle_node and obstacle_node.name
-			and minetest.registered_nodes[obstacle_node.name].walkable == true) then
-			-- Check nodes above, obstacle may be jumpable
-			if (args.enable_obstacle_jump) then
-				-- TODO: Check all nodes between this and up to NPC's height?
-				local node_above = minetest.get_node_or_nil({
-					x=obstacle_pos.x,
-					y=obstacle_pos.y + self.data.env.max_jump_height,
-					z=obstacle_pos.z})
-				if (node_above and node_above.name
-					and minetest.registered_nodes[node_above].walkable == false) then
-
-					minetest.log("Jumping to "..minetest.pos_to_string(node_above))
-					_npc.move.jump(self, {target_pos = node_above})
-				end
-			end
-
-		end
-
-	end
+--	end
 
 	-- TODO: Continue..
-	if (args.avoid_drops) then
-		-- Check for drops
-		local node_below = minetest.get_node_or_nil({x=trgt_pos.x, y=trgt_pos.y-1, z=trgt_pos.z})
-	end
+--	if (args.avoid_drops) then
+--		-- Check for drops
+--		local node_below = minetest.get_node_or_nil({x=trgt_pos.x, y=trgt_pos.y-1, z=trgt_pos.z})
+--	end
 
 	local yaw = args.yaw or minetest.dir_to_yaw(dir)
 	if not velocity then velocity = vector.multiply(dir, speed) end
