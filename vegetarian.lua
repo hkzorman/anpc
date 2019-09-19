@@ -29,9 +29,9 @@ npc.model.register_animation("character_anpc.b3d", "mine_once", {
 })
 
 -- Nodes
-npc.env.register_operable_node("beds:bed_bottom", 
-	{"bed"}, 
-	{}, 
+npc.env.register_node("beds:bed_bottom", 
+	{"bed"},
+	{},
 	function(self, args)
 		local pos = args.pos
 		local node = minetest.get_node_or_nil(pos)
@@ -39,7 +39,7 @@ npc.env.register_operable_node("beds:bed_bottom",
 		local dir = minetest.facedir_to_dir(node.param2)
 		-- Calculate bed_pos
 		local bed_pos = {
-			x = pos.x + dir.x / 2, 
+			x = pos.x + dir.x / 2,
 			y = pos.y,
 			z = pos.z + dir.z / 2
 		}
@@ -137,7 +137,7 @@ npc.proc.register_program("vegetarian:idle", {
 						expr = {
 							left  = "@random.1.10",
 							op    = "<=",
-							right = 2 
+							right = 2
 						},
 						true_instructions = {
 							{name = "npc:move:walk", args = {
@@ -400,26 +400,26 @@ minetest.register_craftitem("anpc:vegetarian_jump", {
 			local entity = pointed_thing.ref:get_luaentity()
 			local dir = {x=1, y=0, z=0}
 			local range = 1
-			
+
 			local self_pos = vector.round(entity.object:get_pos())
 			local next_pos_front = {x = self_pos.x, y = self_pos.y, z = self_pos.z + 1}
 			local next_pos_below = {x = self_pos.x, y = self_pos.y - 1, z = self_pos.z + 1}
 			local next_y_diff = 0
-			
+
 			local next_nod = minetest.get_node(next_pos_front)
 			if (next_nod.name ~= "air" and minetest.registered_nodes[next_nod.name].walkable == true) then
 				next_y_diff = 1
 				range = 2
 			else
 				next_nod = minetest.get_node(next_pos_below)
-				if (next_nod.name == "air") then 
+				if (next_nod.name == "air") then
 					range = 0.5
 					next_y_diff = -1
 				end
 			end
-			
+
 			local mid_point = (entity.collisionbox[5] - entity.collisionbox[2]) / 2
-			
+
 			-- Based on range, doesn't takes time into account
 			local y_speed = math.sqrt ( (10 * range) / (math.sin(2 * (math.pi / 3))) ) + mid_point
 			entity.is_jumping = true
@@ -433,17 +433,17 @@ minetest.register_craftitem("anpc:vegetarian_jump", {
 			end
 --			local initial_y = self_pos.y + mid_point
 --			local target_y  = self_pos.y + mid_point + next_y_diff
---			local y_speed = target_y + 5 - initial_y 
-			
+--			local y_speed = target_y + 5 - initial_y
+
 			minetest.log("This is y_speed: "..dump(y_speed))
 			minetest.log("This is x speed: "..dump(x_speed))
-			
-			
+
+
 			entity.object:set_pos(vector.round(entity.object:get_pos()))
 			local vel = {x=0, y=y_speed, z=x_speed}
 			entity.object:set_velocity(vel)
 			entity.timer = 0
-			
+
 		end
 	end
 })

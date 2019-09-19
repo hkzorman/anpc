@@ -25,9 +25,9 @@ local program_table = {}
 local instruction_table = {}
 local hl_task_table = {}
 local node_table = {}
+local node_group_name_map = {}
+local group_to_pos_map = {}
 
---local programs = {}
---local instructions = {}
 local models = {}
 
 -----------------------------------------------------------------------------------
@@ -120,14 +120,12 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 				if obj then
 					-- Check if player
 					if obj:is_player() then
-
 						-- Store tracking record
 						self.data.proc[self.process.current.id][key] = {
 							userdata_type = "object",
 							obj_type = "player",
 							obj_attr = obj:get_player_name()
 						}
-
 					elseif obj:get_luaentity() then
 						-- Generate a tracking ID for entities
 						local id = "anpc:track:id:"..tostring(math.random(1000, 9999))
@@ -296,13 +294,13 @@ end
 -- with nodes like air, grass and stairs.
 _npc.env.node_is_walkable = function(self, args)
 	local node = minetest.get_node_or_nil(args.pos)
-	if (node and node.name 
+	if (node and node.name
 		and (
 			minetest.registered_nodes[node.name].walkable == false
 			or minetest.get_item_group(next_node_below.name, "stair") > 0
 			or minetest.get_item_group(next_node_below.name, "slab") > 0
 		)) then
-		return true	
+		return true
 	end
 	return false
 end
@@ -313,10 +311,10 @@ _npc.env.node_can_jump_to = function(self, args)
 		-- Can jump, let's see now if we have clearance to land
 		if (args.check_clearance == true) then
 			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
-			for (i = 1, height) do 
+			for (i = 1, height) do
 				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
 					return false
-				end	
+				end
 			end
 			return true
 		end
@@ -332,10 +330,10 @@ _npc.env.node_can_drop_to = function(self, args)
 		-- Can jump, let's see now if we have clearance to land
 		if (args.check_clearance == true) then
 			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
-			for (i = 1, height) do 
+			for (i = 1, height) do
 				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
 					return false
-				end	
+				end
 			end
 			return true
 		end
@@ -344,42 +342,75 @@ _npc.env.node_can_drop_to = function(self, args)
 	return false
 end
 
--- Find nodes within a given radius or areas
--- 
+-- Find nodes with the following criteria:
+--   - radius:  (required if `min_pos` and `max_pos` not given)
+--   - min_pos: (required if `max_pos` given and `radius` not given)
+--   - max_pos: (required if `min_pos` given and `radius` not given)
+--   - nodenames: array of node names to find, required if `categories` not given
+--   - categories: array of node category names to find, required if `nodenames` not given
+--   - single_match: boolean, find only one node and return that node (optional, default `true`)
+--   - owned_only: boolean, only return nodes that are owned by the NPC 
+--                (optional, default `nil`, not checked)
+--   - used_only: boolean, only find nodes that are used. If false, it will find only un-used
+--               nodes (optional, default `nil`, not checked) 
 _npc.env.node_find = function(self, args)
 
 	local start_pos = args.pos or vector.round(self.object:get_pos())
 	local radius = args.radius or self.data.env.view_range
 	local min_pos = args.min_pos
 	local max_pos = args.max_pos
-	
+
 	-- Calculate node names if categories are given
 	local nodenames = args.nodenames or {}
-	if (args.categories) then
-		for _, nodes in pairs() do
-			for i = 1, #args.categories do
-				
+	if (not args.nodenames and args.categories) then
+		for i = 1, #args.categories do
+			local category_nodenames = node_group_name_map[args.categories[i]]
+			for j = 1, #category_nodenames do
+				nodenames[#nodenames + 1] = category_nodenames[j]
 			end
 		end
 	end
+	-- If no nodenames then just return
+	if (#nodenames == 0) then return nil end
 
-	if (not min_pos) and (not max_pos) and (args.matches == "single") then
-		local result = minetest.find_node_near(start_pos, radius, args.nodenames)
-		return result
+	local nodes_found = {}
+	if (not min_pos) and (not max_pos) and (args.single_match == true) then
+		nodes_found = minetest.find_node_near(start_pos, radius, args.nodenames)
 	end
-	
+
 	-- Calculate area if just radius given
-	if (not min_pos) and (not max_pos) and (not args.matches or args.matches == "many") then
+	if (not min_pos) and (not max_pos) and (not args.single_match) then
 		local y_radius = args.y_radius or radius
 		local y_offset = args.y_offset or 0
 		min_pos = {x=start_pos.x - radius, y=(start_pos.y + y_offset) - y_radius, z=start_pos.z - radius}
 		max_pos = {x=start_pos.x + radius, y=(start_pos.y + y_offset) + y_radius, z=start_pos.z + radius}
 	end
 
-	--minetest.log("Searching for "..dump(args.nodenames).."\nin area: "..minetest.pos_to_string(min_pos)..", "..minetest.pos_to_string(max_pos))
-
-	local result = minetest.find_nodes_in_area(min_pos, max_pos, args.nodenames)
-	--minetest.log("Found: "..dump(result))
+	nodes_found = minetest.find_nodes_in_area(min_pos, max_pos, nodenames)
+	minetest.log("Found: "..dump(nodes))
+	
+	if (args.owned_only == nil and args.used_only == nil) then return nodes_found end
+	
+	-- Apply filters
+	local result = {}
+	for i = 1, #nodes_found do
+		local meta = minetest.get_meta(nodes_found[i])
+		local is_owner = meta:get_string("anpc:owner") == self.npc_id
+		local is_user = meta:get_string("anpc:user") == self.npc_id
+		
+		if (args.owned_only == true && is_owner == true) then
+			result[#result + 1] = nodes_found[i]
+		elseif (args.owned_only == false) then
+			result[#result + 1] = nodes_found[i]
+		end
+		
+		if (args.used_only == true && is_user == true) then
+			result[#result + 1] = nodes_found[i]
+		elseif (args.used_only == false) then
+			result[#result + 1] = nodes_found[i]
+		end
+	end
+	
 	return result
 end
 
@@ -407,15 +438,25 @@ _npc.env.node_npc_is_user = function(self, args)
 	end
 end
 
+-- This function will mark a specific node in the map as owned by
+-- the NPC. This can be used to mark nodes such as beds as being
+-- owned by a specific NPC and avoid multiple NPCs trying to own same
+-- node. This will also add the node to the node store.
 _npc.env.node_set_owned = function(self, args)
 	local meta = minetest.get_meta(args.pos)
 	if (meta) then
+		local node = minetest.get_node_or_nil(args.pos)
 		local owner = meta:get_string("anpc:owner")
 		minetest.log("Owner: "..dump(owner))
 		if (owner == self.npc_id) then
 			if (args.value == true) then
 				return true
 			else
+				-- Remove from node storage
+				_npc.env.node_store_remove(self, {
+					pos = args.pos,
+					categories = args.categories or {[1] = "generic"}
+				})
 				-- Remove attribute, set as un-owned
 				meta:set_string("anpc:owner", nil)
 				return true
@@ -424,6 +465,13 @@ _npc.env.node_set_owned = function(self, args)
 			-- Unable to change ownership as NPC is not the owner
 			return false
 		else
+			-- Add to node storage
+			_npc.env.node_store_add(self, {
+				name = node.name,
+				label = args.label
+				pos = args.pos,
+				categories = args.categories or {[1] = "generic"}
+			})
 			meta:set_string("anpc:owner", self.npc_id)
 			return true
 		end
@@ -452,16 +500,78 @@ _npc.env.node_set_used = function(self, args)
 	end
 end
 
+-- The following functions manages the NPC node store. This store
+-- is used to keep track of nodes the NPC cares about.
 _npc.env.node_store_add = function(self, args)
-
+	-- Initialize storage
+	if not self.data.env.nodes then self.data.env.nodes = {} end
+	for i = 1, #args.categories do
+		-- Initialize category
+		if not self.data.env.nodes[args.categories[i]] then
+			self.data.env.nodes[args.categories[i]] = {}
+		end
+		-- Add node
+		local is_primary = args.is_primary
+		if is_primary == nil then is_primary = false end
+		self.data.env.nodes[args.categories[i]][#self.data.env.nodes[args.categories[i]] + 1] = {
+			is_primary = is_primary,
+			pos = args.pos,
+			name = args.name,
+			label = args.label
+		}
+	end
 end
 
 _npc.env.node_store_get = function(self, args)
-
+	if not self.data.env.nodes then return nil end
+	local result = {}
+	
+	for i = 1, #args.categories do
+		if not self.data.env.nodes[args.categories[i]] then return nil end
+		for j = 1, #self.data.env.nodes[args.categories[i]] do
+			local current = self.data.env.nodes[args.categories[i]][j]
+			local found = true
+			
+			if args.name then found = found and args.name == current.name end
+			if args.label then found = found and args.label == current.label end
+			if args.pos then found = found and vector.equals(args.pos, current.pos) end
+			if args.is_primary then found = found and current.is_primary == true end
+			
+			if found == true then
+				if args.only_one == true then
+					return current
+				else
+					-- Returns a copy so that the originals are not modifiable
+					result[#result + 1] = {
+						name = current.name,
+						label = current.label,
+						pos = current.pos,
+						is_primary = current.is_primary
+					}
+				end 
+			end
+		end
+	end
+	return result
 end
 
 _npc.env.node_store_remove = function(self, args)
-
+	if not self.data.env.nodes then return false end
+	
+	local deleted_count = 0
+	for i = 1, #args.categories do
+		if self.data.env.nodes[args.categories[i]] then
+			for j = 1, #self.data.env.nodes[args.categories[i]] do
+				local current_pos = self.data.env.nodes[args.categories[i]][j].pos
+				if vector.equals(current_pos, args.pos) then
+					self.data.env.nodes[args.categories[i]][j] = nil
+					deleted_count = deleted_count + 1
+				end
+			end
+		end
+	end
+	
+	return deleted_count > 0
 end
 
 _npc.model.set_animation = function(self, args)
@@ -470,30 +580,30 @@ _npc.model.set_animation = function(self, args)
 	local model = models[self.object:get_properties().mesh]
 	if not model then return false end
 	if not model.animations[args.name] then return false end
-	
+
 	local animation = model.animations[args.name]
 	local loop = animation.loop
 	local speed = args.speed or animation.speed or 30
 	if (loop == nil) then loop = true end
 	self.object:set_animation(
         {
-            x = animation.start_frame, 
+            x = animation.start_frame,
             y = animation.end_frame
         },
         speed,
         animation.blend or 0,
         loop
     )
-    
+
     if ((args.animation_after or animation.animation_after) and loop == false) then
     	minetest.after(
-    		(animation.end_frame - animation.start_frame) / animation.speed, 
-    		_npc.model.set_animation, 
+    		(animation.end_frame - animation.start_frame) / animation.speed,
+    		_npc.model.set_animation,
     		self, {
     			name = args.animation_after or animation.animation_after
     		})
     end
-    
+
     return true
 end
 
@@ -532,7 +642,7 @@ _npc.proc.schedule_add = function(self, args)
 		end_time = args.end_time,
 		dependent_entry_id = args.dependent_entry_id
 	}
-	
+
 	return #self.data.schedule
 end
 
@@ -832,10 +942,10 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			{name = "npc:var:set", args = {key="for_value", value=nil}}
 
 	elseif instruction.name == "npc:wait" then
-	
+
 		-- This is not a busy wait, this modifies the interval in two instructions
 		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil)
-		instruction_list[#instruction_list + 1] = 
+		instruction_list[#instruction_list + 1] =
 			{key="_prev_proc_int", name="npc:get_proc_interval"}
 		instruction_list[#instruction_list + 1] =
 			{name="npc:set_proc_interval", args={wait_time = wait_time, value = function(self, args)
@@ -994,16 +1104,26 @@ end
 --   }
 -- operation: A function that is called when the instruction 'npc:env:node:operate' is executed
 -- the function is given two parameters: 'self', and a table of arguments 'args'
-npc.env.register_operable_node = function(name, categories, properties, operation)
+npc.env.register_node = function(name, groups, properties, operation)
 	if node_table[name] ~= nil then
 		return false
 	else
 		node_table[name] = {
-			categories = categories,
+			groups = groups,
 			properties = properties,
 			operation = operation
 		}
 		return true
+	end
+
+	-- Insert into group_to_name_map - this is used when searching
+	-- for nodes of a specific group
+	for i = 1, #groups do
+		-- Create group if it doesn't exists
+		if not node_group_name_map[groups[i]] then
+			node_group_name_map[groups[i]] = {}
+		end
+		node_group_name_map[groups[i]][#node_group_name_map[groups[i]] + 1] = name
 	end
 end
 
@@ -1021,12 +1141,12 @@ end
 -- }
 npc.model.register_animation = function(model_name, animation_name, animation_params)
 	-- Initialize if not present
-	if (not models[model_name]) then 
+	if (not models[model_name]) then
 		models[model_name] = {
 			animations = {}
 		}
 	end
-	
+
 	models[model_name].animations[animation_name] = animation_params
 end
 
@@ -1175,7 +1295,6 @@ end)
 npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
 	self.timers.instr_timer = nil
 end)
-
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -1351,7 +1470,7 @@ npc.proc.register_instruction("npc:move:to_pos", function(self, args)
 	self.object:move_to(args.pos, true)
 end)
 
--- 
+--
 _npc.move.jump = function(self, args)
 
 	local trgt_pos = args.target_pos
@@ -1359,39 +1478,39 @@ _npc.move.jump = function(self, args)
 	--local cardinal_dir = args.cardinal_dir
 	local range = args.range or 1 -- horizontal distance the NPC will move on jump
 	local speed = args.speed or 1
-	
+
 	local self_pos = vector.round(self.object:get_pos())
 	local dir = vector.direction(self_pos, trgt_pos)
-	
-	-- Checks nodes in front to 
+
+	-- Checks nodes in front to
 	local next_pos_front = {x = self_pos.x + dir.x, y = self_pos.y, z = self_pos.z + dir.y}
 	local next_pos_below = {x = self_pos.x + dir.x, y = self_pos.y - 1, z = self_pos.z + dir.z}
 	local next_y_diff = 0
-	
+
 	local next_nod = minetest.get_node(next_pos_front)
 	if (next_nod.name ~= "air" and minetest.registered_nodes[next_nod.name].walkable == true) then
 		next_y_diff = 1
 		range = 2
 	else
 		next_nod = minetest.get_node(next_pos_below)
-		if (next_nod.name == "air") then 
+		if (next_nod.name == "air") then
 			range = 0.5
 			next_y_diff = -1
 		end
 	end
-	
+
 	local mid_point = (self.collisionbox[5] - self.collisionbox[2]) / 2
-	
+
 	-- Based on range, doesn't takes time into account
 	local y_speed = math.sqrt ( (10 * range) / (math.sin(2 * (math.pi / 3))) ) + mid_point
 	if (next_y_diff == -1) then y_speed = 0 end
 --	local x_speed = 1
 --	if (next_y_diff == -1) then
 --		x_speed = 1 / (math.sqrt( (2 + mid_point) / (10) ))
---	end 
-	
+--	end
+
 	minetest.log("This is y_speed: "..dump(y_speed))
-	
+
 	self.object:set_pos(self_pos)
 	local vel = {x=dir.x * speed, y=y_speed, z=dir.z * speed}
 	self.object:set_velocity(vel)
@@ -1445,60 +1564,60 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	end
 
 	local dir = vector.direction(self_pos, trgt_pos)
-	
-	-- Obstacle avoidance: in order to use these instruction in a loop, 
+
+	-- Obstacle avoidance: in order to use these instruction in a loop,
 	-- some obstacle avoidance features can be enabled via arguments. In
 	-- general, these are the possible obstacle avoidance:
 	--   1. The NPC will jump over any jumpable-obstacle
-	--   2. For unjumpable obstacles, the NPC will evade obstacles in a 
-	--      given distance by turning on any direction between -90 and 
+	--   2. For unjumpable obstacles, the NPC will evade obstacles in a
+	--      given distance by turning on any direction between -90 and
 	--		90 degrees from the current direction.
 	--   3. The NPC will not fall down a specified distance and will instead
-	--      turn around in a -90 to 90 degrees. If that fails, the NPC will 
+	--      turn around in a -90 to 90 degrees. If that fails, the NPC will
 	--      turn 180 degrees around.
-	
+
 	if (args.avoid_obstacles) then
 		-- Check for solid obstacles
 		local obstacle_radius = args.obstacle_detection_radius or 3
 		local obstacle_pos = {}
 		for i = 2, obstacle_radius + 1 do
 			obstacle_pos.x = self_pos.x + (dir.x * obstacle_radius)
-			obstacle_pos.y = self_pos.y, 
+			obstacle_pos.y = self_pos.y,
 			obstacle_pos.z = self_pos.z + (dir.z * obstacle_radius)
 			local obstacle_node = minetest.get_node_or_nil(obstacle_pos)
-			
+
 		end
-		
-		
-		
-		
-		if (obstacle_node and obstacle_node.name 
+
+
+
+
+		if (obstacle_node and obstacle_node.name
 			and minetest.registered_nodes[obstacle_node.name].walkable == true) then
 			-- Check nodes above, obstacle may be jumpable
 			if (args.enable_obstacle_jump) then
 				-- TODO: Check all nodes between this and up to NPC's height?
 				local node_above = minetest.get_node_or_nil({
-					x=obstacle_pos.x, 
-					y=obstacle_pos.y + self.data.env.max_jump_height, 
+					x=obstacle_pos.x,
+					y=obstacle_pos.y + self.data.env.max_jump_height,
 					z=obstacle_pos.z})
-				if (node_above and node_above.name 
+				if (node_above and node_above.name
 					and minetest.registered_nodes[node_above].walkable == false) then
-					
+
 					minetest.log("Jumping to "..minetest.pos_to_string(node_above))
 					_npc.move.jump(self, {target_pos = node_above})
 				end
 			end
-		
+
 		end
-		
+
 	end
-	
+
 	-- TODO: Continue..
 	if (args.avoid_drops) then
 		-- Check for drops
 		local node_below = minetest.get_node_or_nil({x=trgt_pos.x, y=trgt_pos.y-1, z=trgt_pos.z})
 	end
-	
+
 	local yaw = args.yaw or minetest.dir_to_yaw(dir)
 	if not velocity then velocity = vector.multiply(dir, speed) end
 
@@ -1528,8 +1647,8 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	-- Correct self pos if NPC is lagging behind
 	minetest.log("Before correction pos: "..minetest.pos_to_string(self.object:get_pos()))
-	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"] 
-	if (prev_trgt_pos ~= nil 
+	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"]
+	if (prev_trgt_pos ~= nil
 		and self.data.proc[self.process.current.id]["_do_correct_pos"] ~= false) then
 		local dist = vector.distance(prev_trgt_pos, u_self_pos)
 		if (dist > 0.25) then
@@ -1537,16 +1656,16 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 			-- when correcting position... wonder if it's worth it.
 			-- This checks that the direction from the NPC's position to the
 			-- previous target (from last iteration) is not pointing backwards
-			-- (from the NPC perspective). 
+			-- (from the NPC perspective).
 			--
-			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
 			 local prev_yaw = minetest.dir_to_yaw(prev_dir)
 			 local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
 			 local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
 			 local min_yaw = prev_yaw - math.pi/2
 			 local max_yaw = prev_yaw + math.pi/2
-			
-			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw) 
+
+			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw)
 			    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
 				  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
 				  -- This removes some annoying jumping
@@ -1555,13 +1674,13 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 				  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
 				  self_pos = prev_trgt_pos
 			 end
-			
+
 			-- Simplified check for the same thing above. This checks that the direction
 			-- is not *exactly* the opposite as the current dir. This *will not* catch
 			-- every single instance of annoying back-jumps, but is a very simple check.
---			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"] 
+--			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
 --			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
---			
+--
 --			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
 --				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(u_self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
 --				-- This removes some annoying jumping
@@ -1575,10 +1694,10 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		-- Let correction work on next call
 		self.data.proc[self.process.current.id]["_do_correct_pos"] = nil
 	end
-	
+
 	-- Return if target pos is same as start pos
 	if self_pos.x == trgt_pos.x
-		and self_pos.z == trgt_pos.z 
+		and self_pos.z == trgt_pos.z
 		and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
 		minetest.log("Same self pos and target pos")
 		--minetest.log("Target pos: "..minetest.pos_to_string(trgt_pos))
@@ -1607,7 +1726,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		end
 		return nil
 	end
-	
+
 	-- Move towards position
 	local next_node = path[1]
 	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z then
@@ -1630,10 +1749,10 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
 
 	local next_node_below = minetest.get_node({x=next_pos.x, y=next_pos.y-1, z=next_pos.z})
-	
+
 	-- Small hack: avoid jumping if we are looking at stairs or slabs.
-	-- TODO: Make it better. Maybe, from the NPC's stepheight, create 
-	-- a raycast in a 45 grade incline. If the raycast doesn't inersects 
+	-- TODO: Make it better. Maybe, from the NPC's stepheight, create
+	-- a raycast in a 45 grade incline. If the raycast doesn't inersects
 	-- anything, we can walk the incline. Otherwise, we jump.
 	local is_incline = false
 	local is_walkable_incline = false
@@ -1644,17 +1763,17 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 			is_walkable_incline = true
 		end
 	end
-	
+
 	if (is_incline and not is_walkable_incline) then
 		-- Jump
 		minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
 		_npc.move.jump(self, {target_pos = next_pos})
 	else
 		local y_speed = 0
-		if (is_walkable_incline == true) then 
+		if (is_walkable_incline == true) then
 			self.data.proc[self.process.current.id]["_do_correct_pos"] = false
 		end
-		
+
 		-- Walk
 		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)
 
@@ -1785,15 +1904,15 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		if instruction then
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
         end
-       
+
 	end
 end
 
 npc.proc.execute_hl_task = function(self, name, args)
 	assert(hl_task_table[name] ~= nil, "High-latency task '"..dump(name).."' doesn't exists.'")
-	
+
 	local task = hl_task_table[name]
-	
+
 	self.process.high_latency_task.args = args
 	self.process.high_latency_task.handler = task.handler
 	self.process.high_latency_task.timeout_handler = task.timeout_handler
@@ -1828,13 +1947,13 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 	self.process.state.id = self.process.key
 	self.process.state.name = name
 	self.process.state.args = args
-	
+
 	if (clear_queue == true) then
 		self.process.queue_head = 1
 		self.process.queue_tail = 1
 		self.process.queue = {}
 	end
-	
+
 	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
 end
@@ -2044,10 +2163,10 @@ npc.do_step = function(self, dtime)
 	if (self.timers.objects_value > self.timers.objects_int) then
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
-	
+
 	-------------------------------------------------------------------------------
 	-- Schedule functionality
-	-- Builds a queue of schedules to be executed on a 
+	-- Builds a queue of schedules to be executed on a
 	-- Check all entries in the schedule. Execute all where:
 	--   earliest_start_time <= current_time <= latest_start_time
 	-------------------------------------------------------------------------------
@@ -2055,8 +2174,8 @@ npc.do_step = function(self, dtime)
 	-- Get current time
 	--local current_time = 24000 * minetest.get_timeofday()
 	--if (current_time <= 500)
-	
-	
+
+
 	-------------------------------------------------------------------------------
 	-- Process functionality
 	-------------------------------------------------------------------------------
@@ -2113,7 +2232,7 @@ npc.do_step = function(self, dtime)
 				self.process.high_latency_task.handler = nil
 			else
 				local is_finished = false
-				if (self.process.high_latency_task.handler) then 
+				if (self.process.high_latency_task.handler) then
 					is_finished = self.process.high_latency_task.handler(self, dtime, args)
 				else
 					-- If no handler exists, cut it short
