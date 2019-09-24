@@ -1367,6 +1367,9 @@ npc.proc.register_instruction("npc:env:node:operate",
 
 npc.proc.register_instruction("npc:env:node:get_property",
 	_npc.env.node_get_property)
+	
+npc.proc.register_instruction("npc:env:node:can_stand_in", 
+	_npc.env.node_can_stand_in)
 
 npc.proc.register_instruction("npc:env:node:get_accessing_pos",
 	_npc.env.node_get_accessing_pos)
