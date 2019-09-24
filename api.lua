@@ -230,6 +230,39 @@ _npc.env.node_get_property = function(self, args)
 	return nil
 end
 
+-- Checks for:
+--   - Selected position is a non-walkable node
+--   - There's vertical clearance for the NPC to fit
+--   - There's a walkable node to stand in
+--   - (optional) There's a x-node-radius horizontal clearance around the NPC (non-solid nodes)
+_npc.env.node_can_stand_in = function(self, args)
+	local node_pos = args.pos
+	local node = minetest.get_node_or_nil(node_pos)
+	local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
+	if (node and node.name) then
+	
+		for y = node_pos.y - 1, node_pos.y + height do
+			is_walkable = false
+			if (y == node_pos.y - 1) then is_walkable = true end
+			
+			local next_node = minetest.get_node_or_nil({x=node_pos.x, y=y, z=node_pos.z}) 
+			if (next_node 
+				and next_node.name 
+				and not minetest.registered_nodes[node.name].walkable == is_walkable) then
+				return false
+			end
+		end
+		
+		if (args.horizontal_radius) then
+			-- TODO: Implement
+		end
+		
+		return true	 
+	end
+	
+	return nil
+end
+
 _npc.env.node_get_accessing_pos = function(self, args)
 
 	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
@@ -248,7 +281,7 @@ _npc.env.node_get_accessing_pos = function(self, args)
 	local vertical_reach = height + (height / 2)
 	-- Then check if the node is within the reach
 	local self_pos = vector.round(self.object:get_pos())
-	if (pos.y > self_pos.y && (pos.y - self_pos.y) > vertical_reach) then
+	if (pos.y > self_pos.y and (pos.y - self_pos.y) > vertical_reach) then
 		return args.pos
 	else
 		-- Adjust the position's y for the pathfinder
@@ -333,7 +366,7 @@ _npc.env.node_can_jump_to = function(self, args)
 		-- Can jump, let's see now if we have clearance to land
 		if (args.check_clearance == true) then
 			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
-			for (i = 1, height) do
+			for i = 1, height do
 				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
 					return false
 				end
@@ -352,7 +385,7 @@ _npc.env.node_can_drop_to = function(self, args)
 		-- Can jump, let's see now if we have clearance to land
 		if (args.check_clearance == true) then
 			local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
-			for (i = 1, height) do
+			for i = 1, height do
 				if (_npc.env.node_is_walkable(self, {pos = {x=pos.x, y=pos.y + i, z=pos.z}}) == false) then
 					return false
 				end
@@ -420,13 +453,13 @@ _npc.env.node_find = function(self, args)
 		local is_owner = meta:get_string("anpc:owner") == self.npc_id
 		local is_user = meta:get_string("anpc:user") == self.npc_id
 		
-		if (args.owned_only == true && is_owner == true) then
+		if (args.owned_only == true and is_owner == true) then
 			result[#result + 1] = nodes_found[i]
 		elseif (args.owned_only == false) then
 			result[#result + 1] = nodes_found[i]
 		end
 		
-		if (args.used_only == true && is_user == true) then
+		if (args.used_only == true and is_user == true) then
 			result[#result + 1] = nodes_found[i]
 		elseif (args.used_only == false) then
 			result[#result + 1] = nodes_found[i]
@@ -490,7 +523,7 @@ _npc.env.node_set_owned = function(self, args)
 			-- Add to node storage
 			_npc.env.node_store_add(self, {
 				name = node.name,
-				label = args.label
+				label = args.label,
 				pos = args.pos,
 				categories = args.categories or {[1] = "generic"}
 			})
@@ -542,6 +575,7 @@ _npc.env.node_store_add = function(self, args)
 			label = args.label
 		}
 	end
+	minetest.log("Node storage: "..dump(self.data.env.nodes))
 end
 
 _npc.env.node_store_get = function(self, args)
@@ -1351,6 +1385,15 @@ npc.proc.register_instruction("npc:env:node:set_owned",
 
 npc.proc.register_instruction("npc:env:node:set_used",
 	_npc.env.node_set_used)
+	
+npc.proc.register_instruction("npc:env:node:store:add",
+	_npc.env.node_store_add)
+
+npc.proc.register_instruction("npc:env:node:store:get",
+	_npc.env.node_store_get)
+
+npc.proc.register_instruction("npc:env:node:store:remove",
+	_npc.env.node_store_remove)
 
 npc.proc.register_instruction("npc:env:node:place", function(self, args)
 	local pos = args.pos
@@ -2133,7 +2176,7 @@ npc.proc.register_program("builtin:node_query", {
 -- Node registrations
 -----------------------------------------------------------------------------------
 
-npc.env.register_operable_node("doors:door_wood_a", {"openable", "doors"},
+npc.env.register_node("doors:door_wood_a", {"openable", "doors"},
 	{["is_open"] = function(self, args)
 		return false
 	end},
@@ -2145,7 +2188,7 @@ npc.env.register_operable_node("doors:door_wood_a", {"openable", "doors"},
 		minetest.registered_nodes["doors:door_wood_a"].on_rightclick(args.pos, node, clicker, nil, nil)
 	end)
 
-npc.env.register_operable_node("doors:door_wood_b", {"openable", "doors"},
+npc.env.register_node("doors:door_wood_b", {"openable", "doors"},
 	{["is_open"] = function(self, args)
 		return true
 	end},
@@ -2491,22 +2534,6 @@ minetest.register_craftitem("anpc:npc_querier", {
 				}
 			})
 			minetest.log(dump(pointed_thing.ref:get_luaentity()))
-		end
-	end
-})
-
-minetest.register_craftitem("anpc:npc_owner", {
-	description = "Owner",
-	inventory_image = "default_apple.png",
-	on_use = function(itemstack, user, pointed_thing)
-		if pointed_thing.type == "object" then
-			--local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
-			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "sample:stupid_init", {
-				radius = 5,
-				nodes = {
-					"default:chest"
-				}
-			})
 		end
 	end
 })

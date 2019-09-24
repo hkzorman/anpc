@@ -150,6 +150,12 @@ npc.proc.register_program("vegetarian:idle", {
 		}}}
 })
 
+-- Wandering program
+-- Try to do some smart wandering instead of just walking back and forth
+npc.proc.register_program("vegetarian:wander", {
+
+})
+
 -- Eating program
 npc.proc.register_program("vegetarian:feed", {
 	{key = "nodes", name = "npc:env:node:find", args = {
@@ -388,6 +394,77 @@ minetest.register_craftitem("anpc:vegetarian_npc_spawner2", {
             entity:set_acceleration({x=0, y=-10, z=0})
 		else
 			minetest.remove_entity(entity)
+		end
+	end
+})
+
+--- For testing purposes ---
+-- Ownership program
+npc.proc.register_program("vegetarian:own", {
+	{name = "npc:env:node:set_owned", args = {
+		value = "@args.value",
+		pos = "@args.pos",
+		categories = "@args.categories"
+	}}
+})
+
+npc.proc.register_program("vegetarian:walk_to_owned", {
+	{key = "target_node", name = "npc:env:node:store:get", args = {
+		only_one = true,
+		categories = {"sign"}
+	}},
+	{name = "npc:if", args = {
+		expr = {
+			left  = "@local.target_node",
+			op    = "~=",
+			right = nil
+		},
+		true_instructions = {
+			{name = "npc:execute", args = {
+				name = "builtin:walk_to_pos",
+				args = {
+					end_pos = function(self, args) 
+						return self.data.proc[self.process.current.id]["target_node"].pos
+					end,
+					force_accessing_node = true
+				}
+			}}
+		}
+	}}
+})
+
+-- Owner item
+minetest.register_craftitem("anpc:vegetarian_owner", {
+	description = "Owner\n(Gives the NPC ownership of the last clicked node)",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			local meta = user:get_meta()
+			local pos = minetest.deserialize(meta:get_string("target_pos"))
+			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "vegetarian:own", {
+				value = true,
+				pos = pos, 
+				categories = {"sign"}
+			})
+			minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data))
+		elseif pointed_thing.type == "node" then
+			local meta = user:get_meta()
+			minetest.log("Pointed thing: "..dump(pointed_thing))
+			minetest.log("The pointed: "..dump(minetest.get_node(pointed_thing.under)))
+			meta:set_string("target_pos", minetest.serialize(pointed_thing.under))
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:vegetarian_walk_to_owned", {
+	description = "Walk-to-owned\n(Walk to an owned node)",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			--local user_meta = user:get_meta()
+			--local pos = minetest.deserialize(meta:get_string("target_pos"))
+			minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data.env.nodes))
+			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "vegetarian:walk_to_owned", {})
 		end
 	end
 })
