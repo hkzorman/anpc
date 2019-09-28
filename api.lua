@@ -61,7 +61,7 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	end
 end
 
-_npc.dsl.evaluate_argument = function(self, expr, args)
+_npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 	if type(expr) == "string" then
 		if expr:sub(1,1) == "@" then
 			local expression_values = string.split(expr, ".")
@@ -83,6 +83,17 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 				return math.random(expression_values[2], expression_values[3])
 			elseif storage_type == "@time" then
 				return 24000 * minetest.get_timeofday()
+			-- This might be temporary
+			elseif storage_type == "@self" then
+				if expression_values[2] == "pos_rounded" then
+					return vector.round(self.object:get_pos())
+				elseif expression_values[2] == "pos" then
+					return self.object:get_pos()
+				elseif expression_values[2] == "dir" then
+					return minetest.yaw_to_dir(self.object:get_yaw())
+				elseif expression_values[2] == "yaw" then
+					return self.object:get_yaw()
+				end
 			end
 			if #expression_values > 2 then
 				--minetest.log("Returning: "..dump(result[tonumber(expression_values[3])]))
@@ -96,14 +107,14 @@ _npc.dsl.evaluate_argument = function(self, expr, args)
 	elseif type(expr) == "table" and expr.left and expr.op then
 		return _npc.dsl.evaluate_boolean_expression(self, expr, args)
 	elseif type(expr) == "function" then
-		return expr(self, args)
+		return expr(self, args, local_vars)
 	end
 	return expr
 end
 
 -- TODO: Might not be needed
-npc.eval = function(self, expr, args)
-	return _npc.dsl.evaluate_argument(self, expr, args)
+npc.eval = function(self, expr, args, local_vars)
+	return _npc.dsl.evaluate_argument(self, expr, args, local_vars)
 end
 
 -- Nil-safe set variable function, plus handling of userdata variables
@@ -263,6 +274,7 @@ _npc.env.node_can_stand_in = function(self, args)
 	return nil
 end
 
+-- Returns a position from where a NPC can approach or access another position.
 _npc.env.node_get_accessing_pos = function(self, args)
 
 	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
@@ -933,7 +945,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			args = {
 				key = "for_value",
 				value = function(self, args)
-					local array = _npc.dsl.evaluate_argument(instruction.args.array)
+					local array = _npc.dsl.evaluate_argument(
+						self, instruction.args.array, args, self.data.proc[self.process.current.id])
 					return array[1]
 				end
 			}
@@ -970,7 +983,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			args = {
 				key = "for_value",
 				value = function(self, args)
-					local array = _npc.dsl.evaluate_argument(instruction.args.array)
+					local array = _npc.dsl.evaluate_argument(
+						self, instruction.args.array, args, self.data.proc[self.process.current.id])
 					return array[self.data.proc[self.process.current.id].for_index]
 				end
 			}
@@ -1000,7 +1014,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	elseif instruction.name == "npc:wait" then
 
 		-- This is not a busy wait, this modifies the interval in two instructions
-		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil)
+		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil, nil)
 		instruction_list[#instruction_list + 1] =
 			{key="_prev_proc_int", name="npc:get_proc_interval"}
 		instruction_list[#instruction_list + 1] =
@@ -1302,12 +1316,13 @@ npc.proc.register_instruction("npc:execute", function(self, args)
 	local processed_args = {}
 	if args.args then
 		for arg_key,arg_value in pairs(args.args) do
-			processed_args[arg_key] = _npc.dsl.evaluate_argument(self, arg_value, raw_args)
+			processed_args[arg_key] = _npc.dsl.evaluate_argument(
+				self, arg_value, raw_args, self.data.proc[self.process.current.id])
 		end
 	end
 	self.process.current.called_execute = true
 	npc.proc.execute_program(self, args.name, processed_args)
-    _npc.program_changed = true
+    self.process.program_changed = true
 end)
 
 npc.proc.register_instruction("npc:set_state_process", function(self, args)
@@ -1706,7 +1721,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	-- Find path
 	if args.check_end_pos_walkable == true then
-		trgt_pos = _npc.env.node_get_accessing_pos(trgt_pos)
+		trgt_pos = _npc.env.node_get_accessing_pos(self, trgt_pos)
 	end
 
 	-- Correct self pos if NPC is lagging behind
@@ -1934,7 +1949,8 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 	local processed_args = {}
 	if raw_args then
 		for arg_key,arg_value in pairs(raw_args) do
-			processed_args[arg_key] = _npc.dsl.evaluate_argument(self, arg_value, raw_args)
+			processed_args[arg_key] = 
+				_npc.dsl.evaluate_argument(self, arg_value, raw_args, self.data.proc[self.process.current.id])
 		end
 	end
 
@@ -2017,6 +2033,8 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 		self.process.queue_tail = 1
 		self.process.queue = {}
 	end
+	
+	self.process.program_changed = true
 
 	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
@@ -2109,71 +2127,44 @@ npc.proc.register_program("builtin:walk_to_pos", {
 	}}
 })
 
-npc.proc.register_program("builtin:node_query_simple", {
-	{key = "nodes", name = "npc:env:node:find", args = {
-		radius = "@args.radius",
-		nodenames = "@args.nodes"
-	}},
+npc.proc.register_program("builtin:follow", {
+	{name="npc:set_proc_interval", args={value = 0.25}},
+	{name = "npc:var:set", args = { key = "target_pos", value = function(self, args) 
+		local object_to_follow = self.process.current.args.object
+		if (object_to_follow and object_to_follow:get_pos()) then
+			return _npc.env.node_get_accessing_pos(self, {pos = vector.round(object_to_follow:get_pos())})
+		end
+	end}},
 	{name = "npc:if", args = {
-		expr = function(self, args)
-			return #self.data.proc[self.process.current.id].nodes > 0
-		end,
-		true_instructions = {
-			{name = "npc:execute", args = {
-				name = "builtin:walk_to_pos",
-				args = function(self, args)
-					-- Choose a random pos
-					local index = math.random(1, #self.data.proc[self.process.current.id].nodes)
-					local result = self.data.proc[self.process.current.id].nodes[index]
-
-					return {
-						end_pos = result
-					}
-				end
-			}}
+		expr = {
+			left  = "@local.target_pos",
+			op    = "~=",
+			right = nil
 		},
-		false_instructions = {
-			-- Move in a random direction
-			{name = "npc:move:walk", args = {
-				cardinal_dir = function(self, args) return math.random(1,7) end
-			}},
-			{name = "npc:move:stand"}
-		}
-	}}
-})
-
-npc.proc.register_program("builtin:node_query", {
-	{key = "nodes", name = "npc:env:node:find", args = {
-		radius = "@args.radius",
-		nodenames = "@args.nodes"
-	}},
-	{name = "npc:if", args = {
-		expr = function(self, args)
-			return #self.data.proc[self.process.current.id].nodes > 0
-		end,
 		true_instructions = {
-			{name = "npc:execute", args = {
-				name = "builtin:walk_to_pos",
-				args = function(self, args)
-					-- Choose a random pos
-					local index = math.random(1, #self.data.proc[self.process.current.id].nodes)
-					local result = self.data.proc[self.process.current.id].nodes[index]
-
-					return {
-						end_pos = result
-					}
-				end
+			-- Check if NPC arrived to the expected position
+			{name = "npc:if", args = {
+				expr = function(self, args, local_v)
+					return vector.equals(vector.round(self.object:get_pos()), local_v.target_pos)
+				end,
+				true_instructions = {
+					-- Stand
+					{name = "npc:move:stand", args = {}}
+				},
+				false_instructions = {
+					-- Move to target pos
+					{name = "npc:execute", args = {
+						name = "builtin:walk_to_pos",
+						args = {
+							end_pos = "@local.target_pos",
+						}
+					}}
+				}
 			}}
-		},
-		false_instructions = {
-			-- Move in a random direction
-			{name = "npc:move:walk", args = {
-				cardinal_dir = function(self, args) return math.random(1,7) end
-			}},
-			{name = "npc:move:stand"}
-		}
-	}}
-})
+		}	
+	}
+}})
+	
 
 -----------------------------------------------------------------------------------
 -- Node registrations
@@ -2380,14 +2371,17 @@ npc.do_step = function(self, dtime)
 		if self.process.current.instruction > -1 then
 			local instruction =
 				program_table[self.process.current.name].instructions[self.process.current.instruction]
+			-- Check if there are no more instructions. This happens usually when the last instruction
+			-- of a program is "npc:execute".
 			if instruction == nil then
 				minetest.log("Process now: "..dump(self.process))
+				return
 			end
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
             --minetest.log("Next 2")
-            if _npc.program_changed == false then
+            if self.process.program_changed == false then
                 self.process.current.instruction = self.process.current.instruction + 1
-            else _npc.program_changed = false end
+            else self.process.program_changed = false end
 		end
 	end
 
@@ -2513,30 +2507,4 @@ minetest.register_craftitem("anpc:npc_spawner", {
 	end
 })
 
-minetest.register_craftitem("anpc:npc_walker", {
-	description = "Walker",
-	inventory_image = "default_apple.png",
-	on_use = function(itemstack, user, pointed_thing)
-		if pointed_thing.type == "object" then
-			local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
-			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "builtin:walk_to_pos", {end_pos = target_pos})
-		end
-	end
-})
 
-minetest.register_craftitem("anpc:npc_querier", {
-	description = "Querier",
-	inventory_image = "default_apple.png",
-	on_use = function(itemstack, user, pointed_thing)
-		if pointed_thing.type == "object" then
-			--local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
-			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "builtin:node_query", {
-				radius = 5,
-				nodes = {
-					"default:chest"
-				}
-			})
-			minetest.log(dump(pointed_thing.ref:get_luaentity()))
-		end
-	end
-})

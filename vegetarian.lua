@@ -152,8 +152,73 @@ npc.proc.register_program("vegetarian:idle", {
 
 -- Wandering program
 -- Try to do some smart wandering instead of just walking back and forth
-npc.proc.register_program("vegetarian:wander", {
+-- The wandering have two approaches: 
 
+npc.proc.register_program("vegetarian:wander", {
+	{name = "npc:if", args = {
+		expr = {
+			left  = "@args.pattern",
+			op    = "==",
+			right = "MSL"
+		},
+		true_instructions = {
+			-- Save the starting position
+			{name = "npc:var:set", args = { key = "start_pos", value = "@self.pos_rounded" }},
+			-- Save the starting direction
+			{name = "npc:var:set", args = { key = "start_yaw", value = "@self.yaw" }},
+			{name = "npc:var:set", args = { key = "found_next_pos", value = false }},
+			{name = "npc:var:set", args = { key = "new_pos_tries", value = 0 }},
+			{name = "npc:while", args = {
+				expr = function(self, args)
+					return self.data.proc[self.process.current.id].new_pos_tries < 5 
+						and self.data.proc[self.process.current.id].found_next_pos == false
+				end,
+				loop_instructions = {
+					-- Calculate a new direction
+					{name = "npc:var:set", args = { key = "new_yaw", value = function(self, args)
+						local dir = math.random(1, 3)
+						local yaw_change = 0
+						if dir == 1 then
+							yaw_change = -1 * (math.pi / 4)
+						elseif dir == 3 then
+							yaw_change = math.pi / 4
+						end
+						return self.object:get_yaw() + yaw_change
+					end}},
+					-- Calculate new position
+					{name="npc:var:set", args = { key = "new_pos", value = function(self, args)
+						local new_dir = minetest.yaw_to_dir(self.data.proc[self.process.current.id].new_yaw)
+						local distance = math.random(3, 7)
+						local self_pos = vector.round(self.object:get_pos())
+						return vector.round(vector.add(self_pos, vector.multiply(new_dir, distance)))
+					end}},
+					{name="npc:var:set", args = { key = "new_pos_tries", value = function(self, args)
+						return self.data.proc[self.process.current.id].new_pos_tries + 1
+					end}},
+					-- Check that new position is valid
+					{key = "found_next_pos", name = "npc:env:node:can_stand_in", args = {
+						pos = "@local.new_pos"
+					}}
+				}
+			}},
+			{name = "npc:if", args = {
+				expr = {
+					left  = "@local.new_pos_tries",
+					op    = "<=",
+					right = 5
+				},
+				true_instructions = {
+					-- Start walking on that direction
+					{name = "npc:execute", args = {
+						name = "builtin:walk_to_pos",
+						args = {
+							end_pos = "@local.new_pos",
+						}
+					}},
+				}
+			}}
+		}
+	}}
 })
 
 -- Eating program
@@ -465,6 +530,19 @@ minetest.register_craftitem("anpc:vegetarian_walk_to_owned", {
 			--local pos = minetest.deserialize(meta:get_string("target_pos"))
 			minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data.env.nodes))
 			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "vegetarian:walk_to_owned", {})
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:vegetarian_follower", {
+	description = "Follower\nMakes the NPC follow the player",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			--local user_meta = user:get_meta()
+			--local pos = minetest.deserialize(meta:get_string("target_pos"))
+			--minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data.env.nodes))
+			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "builtin:follow", {object = user}, true)
 		end
 	end
 })

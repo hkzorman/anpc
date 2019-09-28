@@ -62,3 +62,32 @@ npc.proc.register_program("sample:silly_initialization", {
 	}}
 })
 
+-- Some sample objects
+minetest.register_craftitem("anpc:npc_walker", {
+	description = "Walker",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
+			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "builtin:walk_to_pos", {end_pos = target_pos})
+		end
+	end
+})
+
+minetest.register_craftitem("anpc:npc_querier", {
+	description = "Querier",
+	inventory_image = "default_apple.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if pointed_thing.type == "object" then
+			--local target_pos = minetest.find_node_near(user:get_pos(), 25, {"default:chest"})
+			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "builtin:node_query", {
+				radius = 5,
+				nodes = {
+					"default:chest"
+				}
+			})
+			minetest.log(dump(pointed_thing.ref:get_luaentity()))
+		end
+	end
+})
+
