@@ -1,0 +1,10 @@
+define program test
+    @local.pos0 = somegarbage(pos = @local.garb, avoid_g = true, donot_care = @local.garbage)
+    @local.pos1 = "a"
+    @local.pos2 = 1
+    @local.pos3 = true
+    if @local.nonsense == "g" then
+        executenonsense()
+    end
+end
+

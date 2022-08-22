@@ -1,18 +1,43 @@
+# Very inflexible, rudimentary and basic interpreter for anpc-script
+# (C) by Zorman2000
+
 import logging
 import re
 import sys
 
+logging.basicConfig(level=logging.INFO)
 #logger = logging.getLogger("gunicorn.error")
 
-test = """
-    @local.pos0 = somegarbage(pos = @local.garb, avoid_g = true, donot_care = @local.garbage)
-    @local.pos1 = "a"
-    @local.pos2 = 1
-    @local.pos3 = true
-    if (@local.nonsense == "g") then
-        executenonsense()
-    end
-"""
+def parse_file(lines):
+    result = []
+    program_names = []
+
+    for i in range(len(lines)):
+        if re.search(r'^(define program).*$', lines[i], re.M|re.I):
+            # Found a program definition, now collect all lines inside the program
+            program_name = lines[i].split("define program")[1].strip()
+            logging.info(f'Found program "{program_name}" definition starting at line {i}')
+            if program_name in program_names:
+                raise Exception(f'Program with name "{program_name}" is already defined.')
+            
+            program_names.append(program_name)
+            program_lines = []
+
+            for j in range(i + 1, len(lines), 1):
+                if re.search(r'^end$', lines[j], re.M|re.I):
+                    # Found definition end, parse this program and continue
+                    result.append(f'npc.proc.register_program("{program_name}", {{')
+                    lua_code_lines = parse_program(program_lines)
+                    for k in range(len(lua_code_lines)):
+                        result.append(f'\t{lua_code_lines[k]}{"," if k < len(lua_code_lines) - 1 else ""}')
+                    result.append("})")
+
+                    i = i + j
+                    break
+                else:
+                    program_lines.append(lines[j])
+
+    return result
 
 def generate_arguments_for_instruction(args_str):
     result = "{"
@@ -61,15 +86,27 @@ def parse_program(lines):
             else:
                 result.append(f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
         # Check for control instruction line
-        elif re.search(r'(while|for|if)\s\(.*\)\s(do|then)', line, re.M|re.I):
-            print(re.search(r'(while|for|if)\s\(.*\)\s(do|then)', line, re.M|re.I))
-
+        elif re.search(r'^\s+(while|for|if)\s\(*.*\)*\s(do|then)$', line, re.M|re.I):
+            control_instr = re.search(r'(while|for|if)', line, re.M|re.I) \
+            .group(0) \
+            .strip()
+            
+            control_start_instr = re.search(r'(do|then)', line, re.M|re.I)
+            
+            bool_expr = re.search(r'')
+            
 
     return result
 
 def main():
-    lines = test.splitlines()
-    lua_code = parse_program(lines)
+    lines = []
+    name = "vegetarian.anpcscript"
+    logging.info(f'Starting parsing file "{name}"')
+    file = open(name, "r")
+    for line in file:
+        lines.append(line)
+
+    lua_code = parse_file(lines)
 
     for i in range(len(lua_code)):
         print(lua_code[i])
