@@ -86,14 +86,17 @@ def parse_program(lines):
             else:
                 result.append(f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
         # Check for control instruction line
-        elif re.search(r'^\s+(while|for|if)\s\(*.*\)*\s(do|then)$', line, re.M|re.I):
+        elif re.search(r'^\s+(while|for|if)\s\(.*\)\s(do|then)$', line, re.M|re.I):
+            # Find the control instruction
             control_instr = re.search(r'(while|for|if)', line, re.M|re.I) \
             .group(0) \
             .strip()
-            
-            control_start_instr = re.search(r'(do|then)', line, re.M|re.I)
-            
-            bool_expr = re.search(r'')
+            # Find the start for the control instruction
+            control_start_instr = re.search(r'(do|then)', line, re.M|re.I).group(0).strip()
+            # Find the boolean expression
+            parenthesis_start = line.find("(")
+            parenthesis_end = line.find(")")
+            if parenthesis_start > -1 and parenthesis_end > -1 and parenthesis_end > parenthesis_start:
             
 
     return result
