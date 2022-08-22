@@ -62,6 +62,9 @@ npc.proc.register_program("vegetarian:init", {
     {name = "vegetarian:set_hunger", args = {value = 0}}
 })
 
+-----------------------------
+-- Idle program
+-----------------------------
 npc.proc.register_program("vegetarian:idle", {
 	{name = "npc:move:stand"},
     {name = "vegetarian:set_hunger", args = {
@@ -293,7 +296,7 @@ npc.proc.register_program("vegetarian:sleep", {
     }},
     {name = "npc:if", args = {
         expr = {
-        	left  = "@local.bed_pos",
+        	left  = "@local.bed_pos",3
         	op    = "~=",
         	right = nil
         },

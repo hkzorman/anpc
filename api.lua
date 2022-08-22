@@ -40,11 +40,6 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
 
-	--minetest.log("Boolean expression: "..dump(expr))
-
-	--minetest.log("Source: "..dump(source))
-	--minetest.log("Target: "..dump(target))
-
 	if operator == "==" then
 		return source == target
 	elseif operator == ">=" then
@@ -52,7 +47,6 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	elseif operator == "<=" then
 		return source <= target
 	elseif operator == "~=" then
-		--minetest.log("Bool expression eval: "..dump(source ~= target))
 		return source ~= target
 	elseif operator == "<" then
 		return source < target
@@ -67,8 +61,7 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 			local expression_values = string.split(expr, ".")
 			local storage_type = expression_values[1]
 			local result = nil
-			--minetest.log("Expression values length: "..dump(#expression_values))
-			--minetest.log("Expression: "..dump(expression_values))
+			
 			if storage_type == "@local" then
 				if self.data.proc[self.process.current.id] then
 					result = _npc.dsl.get_var(self, expression_values[2])
@@ -96,7 +89,6 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				end
 			end
 			if #expression_values > 2 then
-				--minetest.log("Returning: "..dump(result[tonumber(expression_values[3])]))
 				return result[tonumber(expression_values[3])]
 			else
 				return result
@@ -642,6 +634,58 @@ _npc.env.node_store_remove = function(self, args)
 	return deleted_count > 0
 end
 
+_npc.env.node_place = function(self, args)
+	local pos = args.pos
+    local node = args.node
+    local source = args.source or "forced"
+    local bypass_protection = args.bypass_protection
+    if bypass_protection == nil then bypass_protection = false end
+    local play_sound = args.play_sound or true
+    local node_at_pos = minetest.get_node_or_nil(pos)
+    -- Check if position is empty or has a node that can be built to
+    if node_at_pos and
+    	(node_at_pos.name == "air" or minetest.registered_nodes[node_at_pos.name].buildable_to == true) then
+        -- Check protection
+        if (not bypass_protection and not minetest.is_protected(pos, self.npc_id))
+                or bypass_protection == true then
+            -- Take from inventory if necessary
+            local place_item = false
+            if source == "take" then
+--                if npc.take_item_from_inventory(self, node, 1) then
+--                    place_item = true
+--                end
+            elseif source == "take_or_forced" then
+                --npc.take_item_from_inventory(self, node, 1)
+                place_item = true
+            elseif source == "forced" then
+                place_item = true
+            end
+            -- Place node
+            if place_item == true then
+                -- Set mine animation
+                self.object:set_animation({
+                    x = npc.ANIMATION_MINE_START,
+                    y = npc.ANIMATION_MINE_END},
+                    self.animation.speed_normal, 0)
+                -- Place node
+                minetest.set_node(pos, {name=node})
+                -- Play place sound
+                if play_sound == true then
+                    if minetest.registered_nodes[node].sounds then
+                        minetest.sound_play(
+                            minetest.registered_nodes[node].sounds.place,
+                            {
+                                max_hear_distance = 10,
+                                object = self.object
+                            }
+                        )
+                    end
+                end
+            end
+        end
+    end
+end
+
 _npc.model.set_animation = function(self, args)
 
 	assert(args.name or args.name == "", "Argument 'name' cannot be nil or empty.")
@@ -1090,8 +1134,9 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	return instruction_list, is_function
 end
 
-npc.proc.register_program = function(name, raw_instruction_list)
+npc.proc.register_program = function(name, program)
 	if program_table[name] ~= nil then
+		assert("Program with name "..name.." already exists")
 		return false
 	else
 		-- Interpret program queue
@@ -1413,57 +1458,7 @@ npc.proc.register_instruction("npc:env:node:store:get",
 npc.proc.register_instruction("npc:env:node:store:remove",
 	_npc.env.node_store_remove)
 
-npc.proc.register_instruction("npc:env:node:place", function(self, args)
-	local pos = args.pos
-    local node = args.node
-    local source = args.source or "forced"
-    local bypass_protection = args.bypass_protection
-    if bypass_protection == nil then bypass_protection = false end
-    local play_sound = args.play_sound or true
-    local node_at_pos = minetest.get_node_or_nil(pos)
-    -- Check if position is empty or has a node that can be built to
-    if node_at_pos and
-    	(node_at_pos.name == "air" or minetest.registered_nodes[node_at_pos.name].buildable_to == true) then
-        -- Check protection
-        if (not bypass_protection and not minetest.is_protected(pos, self.npc_id))
-                or bypass_protection == true then
-            -- Take from inventory if necessary
-            local place_item = false
-            if source == "take" then
---                if npc.take_item_from_inventory(self, node, 1) then
---                    place_item = true
---                end
-            elseif source == "take_or_forced" then
-                --npc.take_item_from_inventory(self, node, 1)
-                place_item = true
-            elseif source == "forced" then
-                place_item = true
-            end
-            -- Place node
-            if place_item == true then
-                -- Set mine animation
-                self.object:set_animation({
-                    x = npc.ANIMATION_MINE_START,
-                    y = npc.ANIMATION_MINE_END},
-                    self.animation.speed_normal, 0)
-                -- Place node
-                minetest.set_node(pos, {name=node})
-                -- Play place sound
-                if play_sound == true then
-                    if minetest.registered_nodes[node].sounds then
-                        minetest.sound_play(
-                            minetest.registered_nodes[node].sounds.place,
-                            {
-                                max_hear_distance = 10,
-                                object = self.object
-                            }
-                        )
-                    end
-                end
-            end
-        end
-    end
-end)
+npc.proc.register_instruction("npc:env:node:place", )
 
 npc.proc.register_instruction("npc:env:node:dig", function(self, args)
 	local pos = args.pos
