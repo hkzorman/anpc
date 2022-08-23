@@ -5,7 +5,7 @@ import logging
 import re
 import sys
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 #logger = logging.getLogger("gunicorn.error")
 
 def parse_file(lines):
@@ -16,9 +16,10 @@ def parse_file(lines):
         if re.search(r'^(define program).*$', lines[i], re.M|re.I):
             # Found a program definition, now collect all lines inside the program
             program_name = lines[i].split("define program")[1].strip()
-            logging.info(f'Found program "{program_name}" definition starting at line {i}')
+            logging.info(f'Found program "{program_name}" definition starting at line {i+1}')
             if program_name in program_names:
-                raise Exception(f'Program with name "{program_name}" is already defined.')
+                logging.error(f'Parsing error: Program with name "{program_name}" is already defined.')
+                sys.exit(1)
             
             program_names.append(program_name)
             program_lines = []
@@ -27,37 +28,23 @@ def parse_file(lines):
                 if re.search(r'^end$', lines[j], re.M|re.I):
                     # Found definition end, parse this program and continue
                     result.append(f'npc.proc.register_program("{program_name}", {{')
-                    lua_code_lines = parse_program(program_lines)
+                    lua_code_lines = parse_instructions(program_lines)
                     for k in range(len(lua_code_lines)):
                         result.append(f'\t{lua_code_lines[k]}{"," if k < len(lua_code_lines) - 1 else ""}')
                     result.append("})")
 
+                    print(i, j)
+                    logging.info(f'Successfully parsed program "{program_name}" ({j-i-1} lines of code)')
                     i = i + j
+                   
+                    
                     break
                 else:
                     program_lines.append(lines[j])
 
     return result
-
-def generate_arguments_for_instruction(args_str):
-    result = "{"
-    keyvalue_pairs = args_str.split(",")
-    pairs_count = len(keyvalue_pairs)
-    for i in range(pairs_count):
-        key_value = keyvalue_pairs[i].split("=")
-        key = key_value[0].strip()
-        value = key_value[1].strip()
-
-        if value[0] == "@":
-            value = f'"{value}"'
-
-        result = result + key + " = " + value
-        if i < pairs_count - 1:
-            result = result + ", "
-        
-    return result + "}"
-
-def parse_program(lines):
+    
+def parse_instructions(lines):
     result = []
 
     for i in range(len(lines)):
@@ -87,19 +74,58 @@ def parse_program(lines):
                 result.append(f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
         # Check for control instruction line
         elif re.search(r'^\s+(while|for|if)\s\(.*\)\s(do|then)$', line, re.M|re.I):
+            control_stack = []
+                    
             # Find the control instruction
             control_instr = re.search(r'(while|for|if)', line, re.M|re.I) \
             .group(0) \
             .strip()
+            control_stack.append(control_instr)
             # Find the start for the control instruction
             control_start_instr = re.search(r'(do|then)', line, re.M|re.I).group(0).strip()
             # Find the boolean expression
+            bool_expr_str = ""
             parenthesis_start = line.find("(")
             parenthesis_end = line.find(")")
             if parenthesis_start > -1 and parenthesis_end > -1 and parenthesis_end > parenthesis_start:
-            
-
+                bool_expr_str = line[parenthesis_start+1:parenthesis_end-1]
+                
+            # Find all instructions that are part of the control
+            # For 'if', we need to search for an else as well.
+            for j in range(i + 1, len(lines), 1):
+                sub_line = lines[j]
+                else_instr = re.search(r'\s*else\s*', sub_line, re.M|re.I)
+                if else_instr:
+                    last_control = control_stack.pop()
+                    if last_control != "if":
+                        logging.error(f'Found "else" keyword without corresponding "if" (line {i+j+1})')
+                        sys.exit(1)
+                    control_stack.append("else")
+                
     return result
+
+## Helper ##
+def generate_arguments_for_instruction(args_str):
+    result = "{"
+    keyvalue_pairs = args_str.split(",")
+    pairs_count = len(keyvalue_pairs)
+    for i in range(pairs_count):
+        key_value = keyvalue_pairs[i].split("=")
+        key = key_value[0].strip()
+        value = key_value[1].strip()
+
+        if value[0] == "@":
+            value = f'"{value}"'
+
+        result = result + key + " = " + value
+        if i < pairs_count - 1:
+            result = result + ", "
+        
+    return result + "}"
+
+def generate_boolean_expression(bool_expr):
+    result = "{"
+
 
 def main():
     lines = []

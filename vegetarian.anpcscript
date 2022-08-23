@@ -3,8 +3,22 @@ define program test
     @local.pos1 = "a"
     @local.pos2 = 1
     @local.pos3 = true
-    if @local.nonsense == "g" then
+    if (@local.nonsense == "g") then
         executenonsense()
+    end
+    
+    while (@local.nonsense != "g") do
+        haha()
+        hahahaha()
+        hahahahahaha()
+    end
+end
+
+define program feed
+    @local.do_something = false
+    while (@local.do_something) do
+        nothing_at_all()
+        else
     end
 end
 
