@@ -33,7 +33,6 @@ def parse_file(lines):
                         result.append(f'\t{lua_code_lines[k]}{"," if k < len(lua_code_lines) - 1 else ""}')
                     result.append("})")
 
-                    print(i, j)
                     logging.info(f'Successfully parsed program "{program_name}" ({j-i-1} lines of code)')
                     i = i + j
                    
@@ -48,7 +47,8 @@ def parse_instructions(lines):
     result = []
 
     for i in range(len(lines)):
-        line = lines[i]
+        line = lines[i].strip()
+        print("Line: ", line)
         # Check for "variable assignment" line
         if re.search(r'[@a-z]*.[a-z_]*\s=\s.*', line, re.M|re.I):
             variable = re.search(r'@[a-z]*.[a-z_]*', line, re.I)
@@ -72,8 +72,9 @@ def parse_instructions(lines):
                 result.append(f'{{key = "{variable_name}", name = "{instr_name}", args = {generate_arguments_for_instruction(args_str)}}}')
             else:
                 result.append(f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
+        
         # Check for control instruction line
-        elif re.search(r'^\s+(while|for|if)\s\(.*\)\s(do|then)$', line, re.M|re.I):
+        elif re.search(r'^\s*(while|for|if)\s\(.*\)\s(do|then)$', line, re.M|re.I):
             control_stack = []
                     
             # Find the control instruction
@@ -92,16 +93,52 @@ def parse_instructions(lines):
                 
             # Find all instructions that are part of the control
             # For 'if', we need to search for an else as well.
+            loop_instructions = []
+            false_instructions = []
+            else_index = -1
             for j in range(i + 1, len(lines), 1):
-                sub_line = lines[j]
+                sub_line = lines[j].strip()
+                print("subline: ", sub_line)
+                
                 else_instr = re.search(r'\s*else\s*', sub_line, re.M|re.I)
                 if else_instr:
                     last_control = control_stack.pop()
                     if last_control != "if":
-                        logging.error(f'Found "else" keyword without corresponding "if" (line {i+j+1})')
+                        logging.error(f'Found "else" keyword without corresponding "if" at: line {i+j+1}')
                         sys.exit(1)
                     control_stack.append("else")
-                
+                    else_index = j
+                    # These are the true_instructions
+                    loop_instructions = lines[i+1:j]
+                    continue
+                end_instr = re.search(r'\s*end\s*', sub_line, re.M|re.I)
+                if end_instr:
+                    last_control = control_stack.pop()
+                    if last_control == "else":
+                        # These are the false instructions
+                        false_instructions = lines[else_index+1:j]
+                    else:
+                        # These are the true/loop instructions
+                        loop_instructions = lines[i+1:j]
+                    # Increase counter to avoid processing lines which are inside controls
+                    print("Old i: ", i)
+                    i = i + j
+                    print("New i: ", i)
+                    break
+            # Now, process all the instructions that we found
+            if not loop_instructions:
+                logging.warning(f'Found control structure "{control_instr}" without any instructions at: line {i+j+1}')
+            processed_loop_instrs = parse_instructions(loop_instructions)
+            processed_false_instrs = parse_instructions(false_instructions)
+            
+            result.append(f'{{name = "npc:{control_instr}", args = {{expr = , true_instructions = {{}}{f", false_instructions = {{}}" if processed_false_instrs else ""}}}}}')
+            
+            print(f'loop: {processed_loop_instrs}')
+            print(f'false: {processed_false_instrs}')
+        # 
+        elif re.search(r'^(?!.*(\sif\s|\swhile\s|\sfor\s|.*=.*\(.*\))).*\(.*\)$', line, re.M|re.I):
+        	result.append(f'{{name = "{line}", args = {{}}}}')
+            
     return result
 
 ## Helper ##

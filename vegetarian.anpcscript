@@ -5,6 +5,8 @@ define program test
     @local.pos3 = true
     if (@local.nonsense == "g") then
         executenonsense()
+    else
+    	executesense()
     end
     
     while (@local.nonsense != "g") do
@@ -18,7 +20,6 @@ define program feed
     @local.do_something = false
     while (@local.do_something) do
         nothing_at_all()
-        else
     end
 end
 
