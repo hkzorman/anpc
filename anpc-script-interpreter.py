@@ -27,9 +27,9 @@ def parse_file(lines):
 				if re.search(r'^end$', lines[j], re.M|re.I):
 					# Found definition end, parse this program and continue
 					result.append(f'npc.proc.register_program("{program_name}", {{')
-					lua_code_lines = parse_instructions(program_lines)
+					lua_code_lines = parse_instructions(program_lines, 1)
 					for k in range(len(lua_code_lines)):
-						result.append(f'\t{lua_code_lines[k]}{"," if k < len(lua_code_lines) - 1 else ""}')
+						result.append(f'{lua_code_lines[k]}{"," if k < len(lua_code_lines) - 1 else ""}')
 					result.append("})")
 
 					logging.info(f'Successfully parsed program "{program_name}" ({j-i-1} lines of code)')
@@ -48,7 +48,7 @@ def parse_instructions(lines, nesting):
 	i = 0
 	while (i < lines_count):
 		line = lines[i].strip()
-		logging.debug("Line: ", lines[i], i)
+		logging.debug(f'Line: {lines[i]}, {i}')
 
 		# Check for "variable assignment" line
 		if re.search(r'[@a-z]*.[a-z_]*\s=\s.*', line, re.M|re.I):
@@ -70,9 +70,9 @@ def parse_instructions(lines, nesting):
 			if parenthesis_start > -1 and parenthesis_end > -1 and parenthesis_end > parenthesis_start:
 				instr_name = assignment_expr[:parenthesis_start]
 				args_str = assignment_expr[parenthesis_start + 1:parenthesis_end]
-				result.append(f'{{key = "{variable_name}", name = "{instr_name}", args = {generate_arguments_for_instruction(args_str)}}}')
+				result.append((nesting*"\t") + f'{{key = "{variable_name}", name = "{instr_name}", args = {generate_arguments_for_instruction(args_str)}}}')
 			else:
-				result.append(f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
+				result.append((nesting*"\t") + f'{{name = "npc:var:set", args = {{key = "{variable_name}", value = {assignment_expr}}}}}')
 		
 		# Check for control instruction line
 		elif re.search(r'^\s*(while|for|if)\s\(.*\)\s(do|then)$', line, re.M|re.I):
@@ -99,7 +99,7 @@ def parse_instructions(lines, nesting):
 			else_index = -1
 			for j in range(i + 1, len(lines), 1):
 				sub_line = lines[j].strip()
-				logging.debug("subline: ", sub_line)
+				logging.debug("subline: " + sub_line)
 				
 				else_instr = re.search(r'\s*else\s*', sub_line, re.M|re.I)
 				if else_instr:
@@ -110,36 +110,36 @@ def parse_instructions(lines, nesting):
 					control_stack.append("else")
 					else_index = j
 					# These are the true_instructions
-					loop_instructions = lines[i+1:j]
+					loop_instructions = lines[i+1:j+1]
 					continue
 				end_instr = re.search(r'\s*end\s*', sub_line, re.M|re.I)
 				if end_instr:
 					last_control = control_stack.pop()
 					if last_control == "else":
 						# These are the false instructions
-						false_instructions = lines[else_index+1:j]
+						false_instructions = lines[else_index+1:j+1]
 					else:
 						# These are the true/loop instructions
-						loop_instructions = lines[i+1:j]
+						loop_instructions = lines[i+1:j+1]
 					# Increase counter to avoid processing lines which are inside controls
-					logging.debug("Old i: ", i)
+					logging.debug(f"Old i: {i}")
 					i = j
-					logging.debug("New i: ", i)
+					logging.debug(f"New i: {i}")
 					break
 			# Now, process all the instructions that we found
 			if not loop_instructions:
 				logging.warning(f'Found control structure "{control_instr}" without any instructions at: line {j+1}')
-			processed_loop_instrs = parse_instructions(loop_instructions)
-			processed_false_instrs = parse_instructions(false_instructions)
+			processed_loop_instrs = parse_instructions(loop_instructions, nesting + 1)
+			processed_false_instrs = parse_instructions(false_instructions, nesting + 1)
 			
 			instructions_name = "true_instructions" if control_instr == "if" else "loop_instructions"
-			loop_instr = '{name = "npc:' + control_instr \
+			loop_instr = (nesting*"\t") + '{name = "npc:' + control_instr \
 			+ ', args = {expr = "", ' + instructions_name \
-			+ ' = {\t\n' + "\t\n".join(processed_loop_instrs) + '\n}'
+			+ ' = {\n' + "\n".join(processed_loop_instrs) + '\n' + (nesting*"\t") + '}'
 			
 			if processed_false_instrs:
-				loop_instr = loop_instr + ', false_instructions = {\t\n' \
-				+ "\t\n".join(processed_loop_instrs) + '\n}'
+				loop_instr = loop_instr + ',\n' + (nesting*"\t") + 'false_instructions = {\n' \
+				+ "\n".join(processed_loop_instrs) + '\n' + (nesting*"\t") + '}'
 			
 			result.append(loop_instr)
 			
@@ -147,7 +147,7 @@ def parse_instructions(lines, nesting):
 			logging.debug(f'false: {processed_false_instrs}')
 		# 
 		elif re.search(r'^(?!.*(\sif\s|\swhile\s|\sfor\s|.*=.*\(.*\))).*\(.*\)$', line, re.M|re.I):
-			result.append(f'{{name = "{line}", args = {{}}}}')
+			result.append((nesting*"\t") + f'{{name = "{line}", args = {{}}}}')
 		i = i + 1
 
 	logging.debug("Returning Lua code lines:\n" + "\n".join(result))
@@ -174,6 +174,7 @@ def generate_arguments_for_instruction(args_str):
 
 def generate_boolean_expression(bool_expr):
 	result = "{"
+	
 
 
 def main():
