@@ -11,7 +11,10 @@ define program test
     
     while (@local.nonsense != "g") do
         haha()
-        hahahaha()
+        if (@local.pos == "a") then    
+			hahahaha()
+		end
+		
         hahahahahaha()
     end
 end
