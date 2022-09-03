@@ -174,6 +174,10 @@ def generate_arguments_for_instruction(args_str):
 
 def generate_boolean_expression(bool_expr):
 	result = "{"
+	import re
+>>> a = re.split(r'(==|<|>|<=|>=|!=)', s)
+>>> print(a)
+['if (@local.g ', '==', " 'g') then"]
 	
 
 
