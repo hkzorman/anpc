@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Syntax highlighter definition for GtkSourceView (gedit, Pluma)
+ Author: Hector Franqui <hector.kio223@gmail.com>
+ Copyright (C) 2022 Hector Franqui <hector.kio223@gmail.com>
+-->
+<language id="anpcscript" name="anpc-script" version="2.0" _section="Script">
+  <metadata>
+    <property name="mimetypes">text/x-lua</property>
+    <property name="globs">*.anpcscript</property>
+    <property name="line-comment-start">//</property>
+    <property name="block-comment-start">/*</property>
+    <property name="block-comment-end">*/</property>
+  </metadata>
+
+  <styles>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="string" name="String" map-to="def:string"/>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="escape" name="Escaped Character" map-to="def:special-char"/>
+    <style id="reserved" name="Reserved Identifier" map-to="def:keyword"/>
+    <style id="label" name="Label" map-to="def:keyword"/>
+    <style id="function" name="Function" map-to="def:function"/>
+    <style id="nil-value" name="Nil Constant" map-to="def:special-constant"/>
+    <style id="boolean" name="Boolean value" map-to="def:boolean"/>
+  </styles>
+
+  <definitions>
+    <context id="lua-escape" style-ref="escape">
+      <match>\\(\d{1,3}|a|b|f|n|r|t|u{[0-9a-fA-F]+?}|v|x[0-9a-fA-F]{2}|z|\\|"|'|\[|\])</match>
+    </context>
+
+    <context id="label" style-ref="label">
+      <match>\:\:[A-Za-z_][A-Za-z0-9_]*\:\:</match>
+    </context>
+
+    <context id="string" style-ref="string" end-at-line-end="true" class="string" class-disabled="no-spell-check">
+      <start>["']</start>
+      <end>\%{0@start}</end>
+      <include>
+        <context ref="lua-escape"/>
+        <context ref="def:line-continue"/>
+      </include>
+    </context>
+
+    <context id="block-comment" style-ref="comment" class="comment" class-disabled="no-spell-check">
+      <start>--\[(=*)\[</start>
+      <end>]\%{1@start}]</end>
+      <include>
+	<context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="line-comment" style-ref="comment" end-at-line-end="true" class="comment" class-disabled="no-spell-check">
+      <start>//</start>
+      <include>
+	<context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="keywords" style-ref="keyword">
+      <keyword>break</keyword>
+      <keyword>do</keyword>
+      <keyword>else</keyword>
+      <keyword>end</keyword>
+      <keyword>for</keyword>
+      <keyword>if</keyword>
+      <keyword>switch</keyword>
+      <keyword>then</keyword>
+      <keyword>while</keyword>
+    </context>
+
+    <context id="functions" style-ref="function">
+      <keyword>execute</keyword>
+      <keyword>timer:register</keyword>
+      <keyword>timer:start</keyword>
+      <keyword>timer:stop</keyword>
+      <!-- Environment instructions -->
+      <keyword>env:node:place</keyword>
+      <keyword>env:node:dig</keyword>
+      <keyword>env:node:operate</keyword>
+      <keyword>env:node:get_property</keyword>
+      <keyword>env:node:can_stand_in</keyword>
+      <keyword>env:node:get_accessing_pos</keyword>
+      <keyword>env:node:find</keyword>
+      <keyword>env:node:is_owner</keyword>
+      <keyword>env:node:is_user</keyword>
+      <keyword>env:node:set_owned</keyword>
+      <keyword>env:node:set_used</keyword>
+      <keyword>env:node:store:add</keyword>
+      <keyword>env:node:store:get</keyword>
+      <keyword>env:node:store:remove</keyword>
+      <keyword>env:find_path</keyword>
+      <keyword>model:set_animation</keyword>
+      <keyword>move:stand</keyword>
+      <keyword>move:rotate</keyword>
+      <keyword>move:to_pos</keyword>
+      <keyword>move:jump</keyword>
+      <keyword>move:walk</keyword>
+      <keyword>move:walk_to_pos</keyword>
+    </context>
+
+    <context id="lua-reserved" style-ref="reserved">
+      <keyword>_[A-Z][A-Za-z0-9_]*</keyword>
+    </context>
+
+    <context id="nil-value" style-ref="nil-value">
+       <keyword>nil</keyword>
+    </context>
+
+    <context id="boolean" style-ref="boolean">
+       <keyword>false</keyword>
+       <keyword>true</keyword>
+    </context>
+
+    <context id="lua" class="no-spell-check">
+      <include>
+        <context ref="def:shebang"/>
+        <context ref="multi-line-string"/>
+        <context ref="label"/>
+        <context ref="string"/>
+        <context ref="block-comment"/>
+        <context ref="line-comment"/>
+        <context ref="keywords"/>
+        <context ref="functions"/>
+        <context ref="lua-reserved"/>
+        <context ref="nil-value"/>
+        <context ref="boolean"/>
+      </include>
+    </context>
+
+  </definitions>
+</language>

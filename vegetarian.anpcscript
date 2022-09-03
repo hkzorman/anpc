@@ -4,15 +4,16 @@ define program test
     @local.pos2 = 1
     @local.pos3 = true
     if (@local.nonsense == "g") then
-        executenonsense()
+        executenonsense(nonsense = @local.nonsense)
     else
     	executesense()
     end
     
-    while (@local.nonsense != "g") do
+    while (@local.nonsense ~= "g") do
         haha()
         if (@local.pos == "a") then    
 			hahahaha()
+			break
 		end
 		
         hahahahahaha()
@@ -21,8 +22,8 @@ end
 
 define program feed
     @local.do_something = false
-    while (@local.do_something) do
-        nothing_at_all()
+    while (@local.do_something == true) do
+        nothing_at_all(something = false)
     end
 end
 
