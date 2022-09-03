@@ -18,10 +18,10 @@ should be supported by the mod.
 	[ ] Follow a player or other entity
 	[ ] Run-away from a player or other entity
 	[ ] Attack a player or another entity
-[ ] Programming API
-	[ ] Implement interpreter for anpc-acript
-		[ ] Support variables and executing instructions
-		[ ] Support control instructions
+[x] Programming API
+	[x] Implement interpreter for anpc-acript
+		[x] Support variables and executing instructions
+		[x] Support control instructions
 [ ] Translate all built-in programs to anpc-script
 
 ### Version 1.0.0
