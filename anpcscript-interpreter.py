@@ -34,6 +34,9 @@ def generate_arguments_for_instruction(args_str):
 	return result + "}"
 
 def generate_boolean_expression(bool_expr):
+	if bool_expr[:4] == "lua:":
+		return bool_expr[4:]
+		
 	result = '{left = "'
 	expr_parts = re.split(r'(==|<|>|<=|>=|~=)', bool_expr)
 	if len(expr_parts) != 3:
@@ -153,7 +156,7 @@ def parse_instructions(lines, nesting):
 			# Find the boolean expression
 			bool_expr_str = ""
 			parenthesis_start = line.find("(")
-			parenthesis_end = line.find(")")
+			parenthesis_end = re.search(r'\)\s*(do|then)$', line, re.M|re.I).span()[0]
 			if parenthesis_start > -1 and parenthesis_end > -1 and parenthesis_end > parenthesis_start:
 				bool_expr_str = line[parenthesis_start+1:parenthesis_end]
 				bool_expr_str = generate_boolean_expression(bool_expr_str)

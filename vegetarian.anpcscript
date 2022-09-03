@@ -9,7 +9,7 @@ define program test
     	executesense()
     end
     
-    while (@local.nonsense ~= "g") do
+    while (lua:function(self, args) return minetest.get_time_of_day() == 2000 end) do
         haha()
         if (@local.pos == "a") then    
 			hahahaha()
