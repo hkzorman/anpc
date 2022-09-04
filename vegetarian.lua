@@ -296,7 +296,7 @@ npc.proc.register_program("vegetarian:sleep", {
     }},
     {name = "npc:if", args = {
         expr = {
-        	left  = "@local.bed_pos",3
+        	left  = "@local.bed_pos",
         	op    = "~=",
         	right = nil
         },

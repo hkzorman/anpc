@@ -28,6 +28,13 @@ local node_table = {}
 local node_group_name_map = {}
 local group_to_pos_map = {}
 
+-- Check if `anpc-dev` mod is enabled. If so, make the program table and instruction
+-- table accessible from `npc.proc.*`
+local mods = minetest.get_modnames()
+for i = 1, #mods do
+	minetest.log(mods[i])
+end
+
 local models = {}
 
 -----------------------------------------------------------------------------------
@@ -1134,7 +1141,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	return instruction_list, is_function
 end
 
-npc.proc.register_program = function(name, program)
+npc.proc.register_program = function(name, raw_instruction_list)
 	if program_table[name] ~= nil then
 		assert("Program with name "..name.." already exists")
 		return false
@@ -1458,7 +1465,8 @@ npc.proc.register_instruction("npc:env:node:store:get",
 npc.proc.register_instruction("npc:env:node:store:remove",
 	_npc.env.node_store_remove)
 
-npc.proc.register_instruction("npc:env:node:place", )
+npc.proc.register_instruction("npc:env:node:place", 
+	_npc.env.node_place)
 
 npc.proc.register_instruction("npc:env:node:dig", function(self, args)
 	local pos = args.pos
