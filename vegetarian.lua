@@ -58,6 +58,23 @@ npc.proc.register_instruction("vegetarian:get_hunger", function(self, args)
     return self.data.global.hunger
 end)
 
+npc.proc.register_instruction("vegetarian:check_can_ack_nearby_objs", function(self, args)
+	-- Random 50% chance
+	local chance = math.random(1, 100)
+	if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
+		return false
+	end
+
+	local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
+	if object then
+		local object_pos = object:get_pos()
+		local self_pos = self.object:get_pos()
+		return vector.distance(object_pos, self_pos) < npc.eval(self, "@args.ack_nearby_objs_dist")
+			and vector.distance(object_pos, self_pos) > 0
+	end
+	return false
+end)
+
 npc.proc.register_program("vegetarian:init", {
     {name = "vegetarian:set_hunger", args = {value = 0}}
 })
@@ -68,9 +85,11 @@ npc.proc.register_program("vegetarian:init", {
 npc.proc.register_program("vegetarian:idle", {
 	{name = "npc:move:stand"},
     {name = "vegetarian:set_hunger", args = {
-        value = function(self, args)
-            return self.data.global.hunger + 2
-        end
+        value = {
+        	left = "@global.hunger",
+        	op   = "+",
+        	right = 2
+        }
     }},
     {name = "npc:if", args = {
         expr = {

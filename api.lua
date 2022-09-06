@@ -4,6 +4,7 @@ local _npc = {
 	dsl   = {},
 	proc  = {},
 	env   = {},
+	obj	  = {},
 	move  = {},
 	model = {}
 }
@@ -29,10 +30,15 @@ local node_group_name_map = {}
 local group_to_pos_map = {}
 
 -- Check if `anpc-dev` mod is enabled. If so, make the program table and instruction
--- table accessible from `npc.proc.*`
+-- table accessible from `npc.proc.*`. This enables debugging tools in `anpc_dev`
 local mods = minetest.get_modnames()
+local enable_debug = false
 for i = 1, #mods do
-	minetest.log(mods[i])
+	if mods[i] == "anpc_dev" then
+		enable_debug = tr
+		npc.proc.program_table = program_table
+		npc.proc.instruction_table = instruction_table
+	end
 end
 
 local models = {}
@@ -59,6 +65,20 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 		return source < target
 	elseif operator == ">" then
 		return source > target
+	elseif operator == "+" then
+		return source + target
+	elseif operator == "-" then
+		return source - target
+	elseif operator == "*" then
+		return source * target
+	elseif operator == "/" then
+		return source / target
+	elseif operator == "%" then
+		return source % target
+	elseif operator == "&&" then
+		return source and target
+	elseif operator == "||" then
+		return source or target
 	end
 end
 
@@ -79,6 +99,26 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				result = self.data.global[expression_values[2]]
 			elseif storage_type == "@env" then
 				result = self.data.env[expression_values[2]]
+			elseif storage_type == "@obj" then
+				-- Supports passing in an index, a tracking ID or "all"
+				-- NOTE: Tracking ID will only work with objects the NPC
+				-- is nearby
+				if type(expression_values[2]) == "string" then
+					if expression_values[2] == "all" then
+						return self.data.env.objects
+					else
+						for i = 1, #self.data.env.objects do
+							if self.data.env.objects[i]
+								and self.data.env.objects[i]:get_luaentity()
+								and self.data.env.objects[i]:get_luaentity().anpc_track_id
+								and self.data.env.objects[i]:get_luaentity().anpc_track_id == expression_values[2] then
+								return self.data.env.objects[i]
+							end
+						end
+					end
+				else
+					result = self.data.env.objects[expression_values[2]]
+				end
 			elseif storage_type == "@random" then
 				return math.random(expression_values[2], expression_values[3])
 			elseif storage_type == "@time" then
@@ -213,9 +253,731 @@ _npc.dsl.get_var = function(self, key)
 end
 
 -----------------------------------------------------------------------------------
--- Environmental functions
+-- Scheduling functions
+-----------------------------------------------------------------------------------
+-- The scheduling functionality is as follows:
+--   - A scheduled entry has the following parameters:
+--     - earliest start time
+--     - latest start time
+--	   - recurrency type
+--     - repeat interval
+--     - end time (if repeat interval given, if not given, repeat always)
+--     - dependent schedule entry ID
+--   - A schedule entry is for a *single* job
+--   - A scheduled job will be priority-enqueued (using npc.execute_program)
+--     - If this job sets a state process, it needs to state how to do it (e.g.
+--       future state vs. immediate state process)
 -----------------------------------------------------------------------------------
 
+-- TODO: Support weekly, monthly and yearly recurrencies
+npc.schedule.recurrency_type = {
+	["none"] = "none",
+	["daily"] = "daily"
+}
+
+-- This function adds an entry (as defined above) to the NPC's schedule
+-- data.
+_npc.proc.schedule_add = function(self, args)
+
+	self.data.schedule[#self.data.schedule + 1] = {
+		program_name = args.program_name,
+		earliest_start_time = args.earliest_start_time,
+		latest_start_time = args.latest_start_time,
+		repeat_interval = args.repeat_interval,
+		end_time = args.end_time,
+		dependent_entry_id = args.dependent_entry_id
+	}
+
+	return #self.data.schedule
+end
+
+_npc.proc.schedule_remove = function(self, args)
+	if self.data.schedule[args.entry_id] ~= nil then
+		self.data.schedule[args.entry_id] = nil
+		return true
+	else
+		return false
+	end
+end
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Program and Instruction Registration
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Returns an array of instructions
+_npc.proc.process_instruction = function(instruction, original_list_size, function_index_map)
+	local instruction_list = {}
+	local is_function = false
+
+	if instruction.name == "npc:if" then
+
+		-- Process true instructions if available
+		local true_instrs = {}
+		for i = 1, #instruction.args.true_instructions do
+			assert(not instruction.args.true_instructions[i].declare,
+				"Function declaration cannot be done inside another instruction.")
+			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i],
+				#true_instrs + original_list_size + 1)
+			for j = 1, #instrs do
+				true_instrs[#true_instrs + 1] = instrs[j]
+			end
+		end
+
+		-- Insert jump to skip true instructions if expr is false
+		local offset = 0
+		if instruction.args.false_instructions then offset = 1 end
+
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:jump_if",
+			args = {
+				expr = instruction.args.expr,
+				pos =  #true_instrs + offset,
+				negate = true,
+				offset = true
+			}
+		}
+
+		-- Insert all true_instructions into result
+		for j = 1, #true_instrs do
+			instruction_list[#instruction_list + 1] = true_instrs[j]
+		end
+
+		-- False instructions
+		if instruction.args.false_instructions then
+
+			-- Process false instructions if available
+			local false_instrs = {}
+			for i = 1, #instruction.args.false_instructions do
+				assert(not instruction.args.false_instructions[i].declare,
+					"Function declaration cannot be done inside another instruction.")
+				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i],
+					#false_instrs + #instruction_list + original_list_size + 1)
+				for j = 1, #instrs do
+					false_instrs[#false_instrs + 1] = instrs[j]
+				end
+			end
+
+			-- Insert jump to skip false instructions if expr is true
+			instruction_list[#instruction_list + 1] = {
+				name = "npc:jump",
+				args = {
+					pos = #false_instrs,
+					offset = true
+				}
+			}
+
+			-- Insert all false_instructions
+			for j = 1, #false_instrs do
+				instruction_list[#instruction_list + 1] = false_instrs[j]
+			end
+
+		end
+
+	elseif instruction.name == "npc:switch" then
+
+		for i = 1, #instruction.args.cases do
+
+			-- Process each case instructions
+			local case_instrs = {}
+			for j = 1, #instruction.args.cases[i].instructions do
+				assert(not instruction.args.cases[i].instructions[j].declare,
+					"Function declaration cannot be done inside another instruction.")
+				local instrs = _npc.proc.process_instruction(instruction.args.cases[i].instructions[j],
+					#case_instrs + original_list_size + 1)
+				for k = 1, #instrs do
+					case_instrs[#case_instrs + 1] = instrs[k]
+				end
+			end
+
+			instruction_list[#instruction_list + 1] = {
+				name = "npc:jump_if",
+				args = {
+					expr = instruction.args.cases[i].case,
+					pos =  #case_instrs,
+					negate = true,
+					offset = true
+				}
+			}
+
+			-- Insert all case instructions
+			for j = 1, #case_instrs do
+				instruction_list[#instruction_list + 1] = case_instrs[j]
+			end
+
+		end
+
+	elseif instruction.name == "npc:while" then
+
+		-- Support time-based while loop.
+		-- The loop will execute as many times as possible within the given time.
+		-- The given time is in seconds, no smaller resolution supported.
+		if instruction.args.time then
+			-- Add instruction to start instruction timer
+			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:start"}
+			-- Modify expression
+			instruction.args.expr = {
+				left = function(self) return self.timers.instr_timer end,
+				op = "<=",
+				right = instruction.args.time
+			}
+		end
+
+		-- The below will actually set the jump to the instruction previous
+		-- to the relevant one - this is done because after the jump
+		-- instruction is executed, the instruction counter will be increased
+		local loop_start = #instruction_list + original_list_size
+		-- Insert all loop instructions
+		for i = 1, #instruction.args.loop_instructions do
+			assert(not instruction.args.loop_instructions[i].declare,
+				"Function declaration cannot be done inside another instruction.")
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
+				loop_start)
+			for j = 1, #instrs do
+				instruction_list[#instruction_list + 1] = instrs[j]
+			end
+		end
+
+		-- Insert conditional to loop back if expr is true
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:jump_if",
+			args = {
+				expr = instruction.args.expr,
+				pos = loop_start - 1,
+				negate = false
+			},
+			loop_end = true
+		}
+
+		-- Add instruction to stop timer
+		if instruction.args.time then
+			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:stop"}
+		end
+
+	elseif instruction.name == "npc:for" then
+
+		-- Initialize loop variable
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_index",
+				value = instruction.args.initial_value
+			}
+		}
+
+		-- The below will actually set the jump to the instruction previous
+		-- to the relevant one - this is done because after the jump
+		-- instruction is executed, the instruction counter will be increased
+		local loop_start = #instruction_list + original_list_size
+		-- Insert all loop instructions
+		for i = 1, #instruction.args.loop_instructions do
+			assert(not instruction.args.loop_instructions[i].declare,
+				"Function declaration cannot be done inside another instruction.")
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
+				loop_start)
+			for j = 1, #instrs do
+				instruction_list[#instruction_list + 1] = instrs[j]
+			end
+		end
+
+		-- Insert loop variable increase instruction
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_index",
+				value = function(self, args)
+					return self.data.proc[self.process.current.id]["for_index"]
+						+ instruction.args.step_increase
+				end
+			}
+		}
+
+		-- Insert conditional to loop back if expr is true
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:jump_if",
+			args = {
+				expr = instruction.args.expr,
+				pos = loop_start - 1,
+				negate = false
+			},
+			loop_end = true
+		}
+
+	-- TODO: Remove for each?
+	elseif instruction.name == "npc:for_each" then
+
+		--assert(type(instruction.args.array) == "table")
+
+		-- Initialize loop variables
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_index",
+				value = 1
+			}
+		}
+
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_value",
+				value = function(self, args)
+					local array = _npc.dsl.evaluate_argument(
+						self, instruction.args.array, args, self.data.proc[self.process.current.id])
+					return array[1]
+				end
+			}
+		}
+
+		-- The below will actually set the jump to the instruction previous
+		-- to the relevant one - this is done because after the jump
+		-- instruction is executed, the instruction counter will be increased
+		local loop_start = #instruction_list + original_list_size
+		-- Insert all loop instructions
+		for i = 1, #instruction.args.loop_instructions do
+			assert(not instruction.args.loop_instructions[i].declare,
+				"Function declaration cannot be done inside another instruction.")
+			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
+				loop_start)
+			for j = 1, #instrs do
+				instruction_list[#instruction_list + 1] = instrs[j]
+			end
+		end
+
+		-- Insert loop variable increase instruction
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_index",
+				value = function(self, args)
+					return self.data.proc[self.process.current.id]["for_index"] + 1
+				end
+			}
+		}
+
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:var:set",
+			args = {
+				key = "for_value",
+				value = function(self, args)
+					local array = _npc.dsl.evaluate_argument(
+						self, instruction.args.array, args, self.data.proc[self.process.current.id])
+					return array[self.data.proc[self.process.current.id].for_index]
+				end
+			}
+		}
+
+		-- Insert conditional to loop back if expr is true
+		instruction_list[#instruction_list + 1] = {
+			name = "npc:jump_if",
+			args = {
+				expr = {
+					left = "@local.for_index",
+					op = "<=",
+					right = function(self, args)
+						return #self.data.proc[self.process.current.id].for_array
+					end
+				},
+				pos = loop_start - 1,
+				negate = false
+			},
+			loop_end = true
+		}
+
+		-- Remove the array and the for-value variables
+		instruction_list[#instruction_list + 1] =
+			{name = "npc:var:set", args = {key="for_value", value=nil}}
+
+	elseif instruction.name == "npc:wait" then
+
+		-- This is not a busy wait, this modifies the interval in two instructions
+		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil, nil)
+		instruction_list[#instruction_list + 1] =
+			{key="_prev_proc_int", name="npc:get_proc_interval"}
+		instruction_list[#instruction_list + 1] =
+			{name="npc:set_proc_interval", args={wait_time = wait_time, value = function(self, args)
+				return args.wait_time - self.timers.proc_int
+			end}}
+		instruction_list[#instruction_list + 1] =
+			{name="npc:set_proc_interval", args={value = "@local._prev_proc_int"}}
+
+	elseif not instruction.name and instruction.declare then
+
+		-- Store function index in map
+		local func_index = #instruction_list + original_list_size
+		function_index_map[instruction.declare] = func_index
+
+		minetest.log("Function declaration: "..dump(instruction))
+
+		-- Process all instructions
+		for i = 1, #instruction.instructions do
+			local instrs = _npc.proc.process_instruction(instruction.instructions[i],
+				func_index)
+			for j = 1, #instrs do
+				instruction_list[#instruction_list + 1] = instrs[j]
+			end
+		end
+
+		is_function = true
+
+	elseif not instruction.name and instruction.call then
+
+		-- Validate we are calling an existing instruction
+		local index = function_index_map[instruction.call]
+		assert(index, "Function "..instruction.call.." not found")
+
+		instruction_list[#instruction_list + 1] =
+			{name="npc:call", args = {name = instruction.call, index = index, key = instruction.key}}
+
+	elseif instruction.name == "npc:timer:register" then
+
+		-- Validations
+		assert(instruction.args.name, "Timer needs a name")
+		local timer_name = "_timer:"..instruction.args.name
+
+		-- Add a return instruction
+		local timer_func_instr = instruction.args.instructions
+		timer_func_instr[#timer_func_instr + 1] = {name="npc:return"}
+
+		-- Process all instructions, and register function
+		local all_instructions, timer_func_index = _npc.proc.process_instruction({
+			declare = timer_name,
+			instructions = instruction.args.instructions
+		}, original_list_size, function_index_map)
+
+		-- Add all instructions
+		for i = 1, #all_instructions do
+			instruction_list[#instruction_list + 1] = all_instructions[i]
+		end
+
+		instruction_list[#instruction_list + 1] = {name="npc:timer:register", args = {
+			name = instruction.args.name,
+			interval = instruction.args.interval,
+			initial_value = instruction.args.initial_value,
+			times_to_run = instruction.args.times_to_run,
+			function_index = original_list_size
+		}}
+
+		is_function = true
+	else
+		-- Insert the instruction
+		instruction_list[#instruction_list + 1] = instruction
+	end
+
+	return instruction_list, is_function
+end
+
+npc.proc.register_program = function(name, raw_instruction_list, source_location)
+	if program_table[name] ~= nil then
+		assert("Program with name "..name.." already exists")
+		return false
+	else
+		-- Interpret program queue
+		-- Convert if, for and while to index-jump instructions
+		local instruction_list = {}
+		local function_table = {}
+		-- This is zero-based as the initial instruction is always initial_instruction - 1
+		-- TODO: Really?
+		-- TODO: Seems like
+		local initial_instruction = 0
+		for i = 1, #raw_instruction_list do
+			-- The following instructions are only for internal use
+			assert(raw_instruction_list[i].name ~= "npc:jump",
+				"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
+			assert(raw_instruction_list[i].name ~= "npc:jump_if",
+				"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
+			assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
+				"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
+			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
+				"Instruction 'npc:timer:instr:start' is only for internal use and cannot be explicitly invoked from a program.")
+			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop",
+				"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
+
+			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i],
+				#instruction_list + 1, function_table)
+			for j = 1, #instructions do
+				instruction_list[#instruction_list + 1] = instructions[j]
+			end
+
+			if is_function then
+				-- Count the number of instructions inside function
+				initial_instruction = initial_instruction + #instructions
+			end
+		end
+
+		if initial_instruction == 0 then initial_instruction = 1 end
+
+		program_table[name] = {
+			function_table = function_table,
+			initial_instruction = initial_instruction,
+			instructions = instruction_list
+		}
+		
+		if enable_debug then
+			program_table[name]["source_file"] = source_location
+		end
+
+		minetest.log("Registered and compiled program '"..dump(name).."' with initial instruction: "..dump(initial_instruction)..":")
+		for i = 1, #instruction_list do
+			minetest.log("["..dump(i).."] = "..dump(instruction_list[i]))
+		end
+
+		--minetest.log(dump(program_table))
+		return true
+	end
+end
+
+npc.proc.register_instruction = function(name, instruction)
+	if instruction_table[name] ~= nil then
+		return false
+	else
+		instruction_table[name] = instruction
+		return true
+	end
+end
+
+npc.proc.register_high_latency_task = function(name, handler, timeout_handler)
+	if hl_task_table[name] ~= nil then
+		return false
+	else
+		hl_task_table[name] = {
+			handler = handler,
+			timeout_handler = timeout_handler
+		}
+	end
+end
+
+-- Parameters:
+-- name: Name of the node, same as when the node is registered with 'minetest.register_node'
+-- categories: Array of tags or categories, that classifies nodes together
+-- properties: An array of functions in the following format:
+--   {
+--		[property_name] = function(self, args)
+--   }
+-- operation: A function that is called when the instruction 'npc:env:node:operate' is executed
+-- the function is given two parameters: 'self', and a table of arguments 'args'
+npc.env.register_node = function(name, groups, properties, operation)
+	if node_table[name] ~= nil then
+		return false
+	else
+		node_table[name] = {
+			groups = groups,
+			properties = properties,
+			operation = operation
+		}
+		return true
+	end
+
+	-- Insert into group_to_name_map - this is used when searching
+	-- for nodes of a specific group
+	for i = 1, #groups do
+		-- Create group if it doesn't exists
+		if not node_group_name_map[groups[i]] then
+			node_group_name_map[groups[i]] = {}
+		end
+		node_group_name_map[groups[i]][#node_group_name_map[groups[i]] + 1] = name
+	end
+end
+
+-- Parameters:
+-- The "animation_name" parameter is the name of the animation
+-- The object "animation_params" is like this:
+-- {
+--		start_frame: integer, required, the starting frame of the animation of the blender model
+--		end_frame: integer, required, the ending frame of the animation of the blender model
+--		speed: integer, required, the speed in which the animation will be played
+--		blend: integer, optional, animation blend is broken, defaults to 0
+--		loop: boolean, optional, default is true. If false, should specify "animation_after"
+--		animation_after: string, optional, default is "stand". Name of animation that will be played
+--   			  		  when this animation is over.
+-- }
+npc.model.register_animation = function(model_name, animation_name, animation_params)
+	-- Initialize if not present
+	if (not models[model_name]) then
+		models[model_name] = {
+			animations = {}
+		}
+	end
+
+	models[model_name].animations[animation_name] = animation_params
+end
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Core Instructions
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Variable instructions
+npc.proc.register_instruction("npc:var:get", function(self, args)
+	_npc.dsl.get_var(self, args.key)
+end)
+
+npc.proc.register_instruction("npc:var:set", function(self, args)
+	_npc.dsl.set_var(self, args.key, args.value, args.userdata_type)
+end)
+
+-- Control instructions
+npc.proc.register_instruction("npc:jump", function(self, args)
+	if args.offset == true then
+		self.process.current.instruction = self.process.current.instruction + args.pos
+	else
+		self.process.current.instruction = args.pos
+	end
+
+	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
+end)
+
+npc.proc.register_instruction("npc:jump_if", function(self, args)
+	local condition = args.expr
+	if args.negate == true then condition = not condition end
+	if condition == true then
+		if args.offset == true then
+			self.process.current.instruction = self.process.current.instruction + args.pos
+		else
+			self.process.current.instruction = args.pos
+		end
+	end
+end)
+
+npc.proc.register_instruction("npc:break", function(self, args)
+	for i = self.process.current.instruction + 1, #program_table[self.process.current.name].instructions do
+		if program_table[self.process.current.name].instructions[i].loop_end then
+			minetest.log("Found last instruction of loop to be: "..dump(program_table[self.process.current.name].instructions[i]))
+			minetest.log("At pos: "..dump(i))
+			self.process.current.instruction = i
+			break
+		end
+	end
+end)
+
+npc.proc.register_instruction("npc:set_proc_interval", function(self, args)
+	self.timers.proc_int = args.value
+end)
+
+npc.proc.register_instruction("npc:get_proc_interval", function(self, args)
+	return self.timers.proc_int
+end)
+
+-- Function instructions
+npc.proc.register_instruction("npc:call", function(self, args)
+
+	-- Insert entry into call stack
+	if not self.data.proc[self.process.current.id]["_call_stack"] then
+		self.data.proc[self.process.current.id]["_call_stack"] = {}
+	end
+
+	local top = #self.data.proc[self.process.current.id]["_call_stack"] + 1
+	self.data.proc[self.process.current.id]["_call_stack"][top] = {
+		key = args.key,
+		index = args.index
+	}
+
+	self.process.current.instruction = args.index
+
+end)
+
+npc.proc.register_instruction("npc:return", function(self, args)
+
+	local top = #self.data.proc[self.process.current.id]["_call_stack"]
+	local stack_entry = self.data.proc[self.process.current.id]["_call_stack"][top]
+
+	-- Set the variable, if needed
+	if args.value and stack_entry.key then
+		_npc.dsl.set_var(self, stack_entry.key, args.value)
+	end
+
+	-- Change current instruction pointer
+	self.process.current.instruction = stack_entry.index
+
+	-- Remove from stack
+	self.data.proc[self.process.current.id]["_call_stack"][top] = nil
+
+end)
+
+npc.proc.register_instruction("npc:execute", function(self, args)
+	local processed_args = {}
+	if args.args then
+		for arg_key,arg_value in pairs(args.args) do
+			processed_args[arg_key] = _npc.dsl.evaluate_argument(
+				self, arg_value, raw_args, self.data.proc[self.process.current.id])
+		end
+	end
+	self.process.current.called_execute = true
+	npc.proc.execute_program(self, args.name, processed_args)
+    self.process.program_changed = true
+end)
+
+npc.proc.register_instruction("npc:set_state_process", function(self, args)
+	npc.proc.set_state_process(self, args.name, args.args)
+end)
+
+-- Timer instructions
+npc.proc.register_instruction("npc:timer:register", function(self, args)
+	if self.data.proc[self.process.current.id] == nil then
+		self.data.proc[self.process.current.id] = {}
+	end
+
+	if self.data.proc[self.process.current.id]["_timers"] == nil then
+		self.data.proc[self.process.current.id]["_timers"] = {}
+	end
+
+	self.data.proc[self.process.current.id]["_timers"][args.name] = {
+		interval = args.interval,
+		value = args.initial_value or 0,
+		is_running = false,
+		execution_count = 0,
+		max_execution_count = args.times_to_run,
+		function_index = args.timer_func_index
+	}
+end)
+
+npc.proc.register_instruction("npc:timer:start", function(self, args)
+	assert(args.name, "No timer name provided")
+	self.data.proc[self.process.current.id]["_timers"][args.name].is_running = true
+end)
+
+npc.proc.register_instruction("npc:timer:stop", function(self, args)
+	assert(args.name, "No timer name provided")
+	self.data.proc[self.process.current.id]["_timers"][args.name].is_running = false
+end)
+
+npc.proc.register_instruction("npc:timer:instr:start", function(self, args)
+	self.timers.instr_timer = 0
+end)
+
+npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
+	self.timers.instr_timer = nil
+end)
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Built-in instructions
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------
+-- Utilities instructions
+-----------------------------------------------------------------------------------
+npc.proc.register_instruction("npc:length", function(self, args)
+	local result = 0
+	for _ in pairs(args.value) do result = result + 1 end
+	return result
+end)
+
+npc.proc.register_instruction("npc:distance_to", function(self, args)
+	if args.x and args.y and args.z then
+		local source = self.object:getpos()
+		local target = {x = args.x, y = args.y, z = args.z}
+		local result = vector.distance(source, target)
+		if args.round then return vector.round(result) else return round end
+	elseif args.object then
+		
+	end
+end)
+
+-----------------------------------------------------------------------------------
+-- Environment-related instructions
+-----------------------------------------------------------------------------------
 _npc.env.node_operate = function(self, args)
 	local node_pos = args.pos
 	local node = minetest.get_node_or_nil(node_pos)
@@ -726,709 +1488,6 @@ _npc.model.set_animation = function(self, args)
     return true
 end
 
------------------------------------------------------------------------------------
--- Scheduling functions
------------------------------------------------------------------------------------
--- The scheduling functionality is as follows:
---   - A scheduled entry has the following parameters:
---     - earliest start time
---     - latest start time
---	   - recurrency type
---     - repeat interval
---     - end time (if repeat interval given, if not given, repeat always)
---     - dependent schedule entry ID
---   - A schedule entry is for a *single* job
---   - A scheduled job will be priority-enqueued (using npc.execute_program)
---     - If this job sets a state process, it needs to state how to do it (e.g.
---       future state vs. immediate state process)
------------------------------------------------------------------------------------
-
--- TODO: Support weekly, monthly and yearly recurrencies
-npc.schedule.recurrency_type = {
-	["none"] = "none",
-	["daily"] = "daily"
-}
-
--- This function adds an entry (as defined above) to the NPC's schedule
--- data.
-_npc.proc.schedule_add = function(self, args)
-
-	self.data.schedule[#self.data.schedule + 1] = {
-		program_name = args.program_name,
-		earliest_start_time = args.earliest_start_time,
-		latest_start_time = args.latest_start_time,
-		repeat_interval = args.repeat_interval,
-		end_time = args.end_time,
-		dependent_entry_id = args.dependent_entry_id
-	}
-
-	return #self.data.schedule
-end
-
-_npc.proc.schedule_remove = function(self, args)
-	if self.data.schedule[args.entry_id] ~= nil then
-		self.data.schedule[args.entry_id] = nil
-		return true
-	else
-		return false
-	end
-end
-
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Program and Instruction Registration
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Returns an array of instructions
-_npc.proc.process_instruction = function(instruction, original_list_size, function_index_map)
-	local instruction_list = {}
-	local is_function = false
-
-	if instruction.name == "npc:if" then
-
-		-- Process true instructions if available
-		local true_instrs = {}
-		for i = 1, #instruction.args.true_instructions do
-			assert(not instruction.args.true_instructions[i].declare,
-				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.true_instructions[i],
-				#true_instrs + original_list_size + 1)
-			for j = 1, #instrs do
-				true_instrs[#true_instrs + 1] = instrs[j]
-			end
-		end
-
-		-- Insert jump to skip true instructions if expr is false
-		local offset = 0
-		if instruction.args.false_instructions then offset = 1 end
-
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if",
-			args = {
-				expr = instruction.args.expr,
-				pos =  #true_instrs + offset,
-				negate = true,
-				offset = true
-			}
-		}
-
-		-- Insert all true_instructions into result
-		for j = 1, #true_instrs do
-			instruction_list[#instruction_list + 1] = true_instrs[j]
-		end
-
-		-- False instructions
-		if instruction.args.false_instructions then
-
-			-- Process false instructions if available
-			local false_instrs = {}
-			for i = 1, #instruction.args.false_instructions do
-				assert(not instruction.args.false_instructions[i].declare,
-					"Function declaration cannot be done inside another instruction.")
-				local instrs = _npc.proc.process_instruction(instruction.args.false_instructions[i],
-					#false_instrs + #instruction_list + original_list_size + 1)
-				for j = 1, #instrs do
-					false_instrs[#false_instrs + 1] = instrs[j]
-				end
-			end
-
-			-- Insert jump to skip false instructions if expr is true
-			instruction_list[#instruction_list + 1] = {
-				name = "npc:jump",
-				args = {
-					pos = #false_instrs,
-					offset = true
-				}
-			}
-
-			-- Insert all false_instructions
-			for j = 1, #false_instrs do
-				instruction_list[#instruction_list + 1] = false_instrs[j]
-			end
-
-		end
-
-	elseif instruction.name == "npc:switch" then
-
-		for i = 1, #instruction.args.cases do
-
-			-- Process each case instructions
-			local case_instrs = {}
-			for j = 1, #instruction.args.cases[i].instructions do
-				assert(not instruction.args.cases[i].instructions[j].declare,
-					"Function declaration cannot be done inside another instruction.")
-				local instrs = _npc.proc.process_instruction(instruction.args.cases[i].instructions[j],
-					#case_instrs + original_list_size + 1)
-				for k = 1, #instrs do
-					case_instrs[#case_instrs + 1] = instrs[k]
-				end
-			end
-
-			instruction_list[#instruction_list + 1] = {
-				name = "npc:jump_if",
-				args = {
-					expr = instruction.args.cases[i].case,
-					pos =  #case_instrs,
-					negate = true,
-					offset = true
-				}
-			}
-
-			-- Insert all case instructions
-			for j = 1, #case_instrs do
-				instruction_list[#instruction_list + 1] = case_instrs[j]
-			end
-
-		end
-
-	elseif instruction.name == "npc:while" then
-
-		-- Support time-based while loop.
-		-- The loop will execute as many times as possible within the given time.
-		-- The given time is in seconds, no smaller resolution supported.
-		if instruction.args.time then
-			-- Add instruction to start instruction timer
-			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:start"}
-			-- Modify expression
-			instruction.args.expr = {
-				left = function(self) return self.timers.instr_timer end,
-				op = "<=",
-				right = instruction.args.time
-			}
-		end
-
-		-- The below will actually set the jump to the instruction previous
-		-- to the relevant one - this is done because after the jump
-		-- instruction is executed, the instruction counter will be increased
-		local loop_start = #instruction_list + original_list_size
-		-- Insert all loop instructions
-		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare,
-				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
-				loop_start)
-			for j = 1, #instrs do
-				instruction_list[#instruction_list + 1] = instrs[j]
-			end
-		end
-
-		-- Insert conditional to loop back if expr is true
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if",
-			args = {
-				expr = instruction.args.expr,
-				pos = loop_start - 1,
-				negate = false
-			},
-			loop_end = true
-		}
-
-		-- Add instruction to stop timer
-		if instruction.args.time then
-			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:stop"}
-		end
-
-	elseif instruction.name == "npc:for" then
-
-		-- Initialize loop variable
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_index",
-				value = instruction.args.initial_value
-			}
-		}
-
-		-- The below will actually set the jump to the instruction previous
-		-- to the relevant one - this is done because after the jump
-		-- instruction is executed, the instruction counter will be increased
-		local loop_start = #instruction_list + original_list_size
-		-- Insert all loop instructions
-		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare,
-				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
-				loop_start)
-			for j = 1, #instrs do
-				instruction_list[#instruction_list + 1] = instrs[j]
-			end
-		end
-
-		-- Insert loop variable increase instruction
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_index",
-				value = function(self, args)
-					return self.data.proc[self.process.current.id]["for_index"]
-						+ instruction.args.step_increase
-				end
-			}
-		}
-
-		-- Insert conditional to loop back if expr is true
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if",
-			args = {
-				expr = instruction.args.expr,
-				pos = loop_start - 1,
-				negate = false
-			},
-			loop_end = true
-		}
-
-	-- TODO: Remove for each?
-	elseif instruction.name == "npc:for_each" then
-
-		--assert(type(instruction.args.array) == "table")
-
-		-- Initialize loop variables
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_index",
-				value = 1
-			}
-		}
-
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_value",
-				value = function(self, args)
-					local array = _npc.dsl.evaluate_argument(
-						self, instruction.args.array, args, self.data.proc[self.process.current.id])
-					return array[1]
-				end
-			}
-		}
-
-		-- The below will actually set the jump to the instruction previous
-		-- to the relevant one - this is done because after the jump
-		-- instruction is executed, the instruction counter will be increased
-		local loop_start = #instruction_list + original_list_size
-		-- Insert all loop instructions
-		for i = 1, #instruction.args.loop_instructions do
-			assert(not instruction.args.loop_instructions[i].declare,
-				"Function declaration cannot be done inside another instruction.")
-			local instrs = _npc.proc.process_instruction(instruction.args.loop_instructions[i],
-				loop_start)
-			for j = 1, #instrs do
-				instruction_list[#instruction_list + 1] = instrs[j]
-			end
-		end
-
-		-- Insert loop variable increase instruction
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_index",
-				value = function(self, args)
-					return self.data.proc[self.process.current.id]["for_index"] + 1
-				end
-			}
-		}
-
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:var:set",
-			args = {
-				key = "for_value",
-				value = function(self, args)
-					local array = _npc.dsl.evaluate_argument(
-						self, instruction.args.array, args, self.data.proc[self.process.current.id])
-					return array[self.data.proc[self.process.current.id].for_index]
-				end
-			}
-		}
-
-		-- Insert conditional to loop back if expr is true
-		instruction_list[#instruction_list + 1] = {
-			name = "npc:jump_if",
-			args = {
-				expr = {
-					left = "@local.for_index",
-					op = "<=",
-					right = function(self, args)
-						return #self.data.proc[self.process.current.id].for_array
-					end
-				},
-				pos = loop_start - 1,
-				negate = false
-			},
-			loop_end = true
-		}
-
-		-- Remove the array and the for-value variables
-		instruction_list[#instruction_list + 1] =
-			{name = "npc:var:set", args = {key="for_value", value=nil}}
-
-	elseif instruction.name == "npc:wait" then
-
-		-- This is not a busy wait, this modifies the interval in two instructions
-		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil, nil)
-		instruction_list[#instruction_list + 1] =
-			{key="_prev_proc_int", name="npc:get_proc_interval"}
-		instruction_list[#instruction_list + 1] =
-			{name="npc:set_proc_interval", args={wait_time = wait_time, value = function(self, args)
-				return args.wait_time - self.timers.proc_int
-			end}}
-		instruction_list[#instruction_list + 1] =
-			{name="npc:set_proc_interval", args={value = "@local._prev_proc_int"}}
-
-	elseif not instruction.name and instruction.declare then
-
-		-- Store function index in map
-		local func_index = #instruction_list + original_list_size
-		function_index_map[instruction.declare] = func_index
-
-		minetest.log("Function declaration: "..dump(instruction))
-
-		-- Process all instructions
-		for i = 1, #instruction.instructions do
-			local instrs = _npc.proc.process_instruction(instruction.instructions[i],
-				func_index)
-			for j = 1, #instrs do
-				instruction_list[#instruction_list + 1] = instrs[j]
-			end
-		end
-
-		is_function = true
-
-	elseif not instruction.name and instruction.call then
-
-		-- Validate we are calling an existing instruction
-		local index = function_index_map[instruction.call]
-		assert(index, "Function "..instruction.call.." not found")
-
-		instruction_list[#instruction_list + 1] =
-			{name="npc:call", args = {name = instruction.call, index = index, key = instruction.key}}
-
-	elseif instruction.name == "npc:timer:register" then
-
-		-- Validations
-		assert(instruction.args.name, "Timer needs a name")
-		local timer_name = "_timer:"..instruction.args.name
-
-		-- Add a return instruction
-		local timer_func_instr = instruction.args.instructions
-		timer_func_instr[#timer_func_instr + 1] = {name="npc:return"}
-
-		-- Process all instructions, and register function
-		local all_instructions, timer_func_index = _npc.proc.process_instruction({
-			declare = timer_name,
-			instructions = instruction.args.instructions
-		}, original_list_size, function_index_map)
-
-		-- Add all instructions
-		for i = 1, #all_instructions do
-			instruction_list[#instruction_list + 1] = all_instructions[i]
-		end
-
-		instruction_list[#instruction_list + 1] = {name="npc:timer:register", args = {
-			name = instruction.args.name,
-			interval = instruction.args.interval,
-			initial_value = instruction.args.initial_value,
-			times_to_run = instruction.args.times_to_run,
-			function_index = original_list_size
-		}}
-
-		is_function = true
-	else
-		-- Insert the instruction
-		instruction_list[#instruction_list + 1] = instruction
-	end
-
-	return instruction_list, is_function
-end
-
-npc.proc.register_program = function(name, raw_instruction_list)
-	if program_table[name] ~= nil then
-		assert("Program with name "..name.." already exists")
-		return false
-	else
-		-- Interpret program queue
-		-- Convert if, for and while to index-jump instructions
-		local instruction_list = {}
-		local function_table = {}
-		-- This is zero-based as the initial instruction is always initial_instruction - 1
-		-- TODO: Really?
-		-- TODO: Seems like
-		local initial_instruction = 0
-		for i = 1, #raw_instruction_list do
-			-- The following instructions are only for internal use
-			assert(raw_instruction_list[i].name ~= "npc:jump",
-				"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:jump_if",
-				"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
-				"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
-				"Instruction 'npc:timer:instr:start' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop",
-				"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
-
-			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i],
-				#instruction_list + 1, function_table)
-			for j = 1, #instructions do
-				instruction_list[#instruction_list + 1] = instructions[j]
-			end
-
-			if is_function then
-				-- Count the number of instructions inside function
-				initial_instruction = initial_instruction + #instructions
-			end
-		end
-
-		if initial_instruction == 0 then initial_instruction = 1 end
-
-		program_table[name] = {
-			function_table = function_table,
-			initial_instruction = initial_instruction,
-			instructions = instruction_list
-		}
-
-		minetest.log("Registered and compiled program '"..dump(name).."' with initial instruction: "..dump(initial_instruction)..":")
-		for i = 1, #instruction_list do
-			minetest.log("["..dump(i).."] = "..dump(instruction_list[i]))
-		end
-
-		--minetest.log(dump(program_table))
-		return true
-	end
-end
-
-npc.proc.register_instruction = function(name, instruction)
-	if instruction_table[name] ~= nil then
-		return false
-	else
-		instruction_table[name] = instruction
-		return true
-	end
-end
-
-npc.proc.register_high_latency_task = function(name, handler, timeout_handler)
-	if hl_task_table[name] ~= nil then
-		return false
-	else
-		hl_task_table[name] = {
-			handler = handler,
-			timeout_handler = timeout_handler
-		}
-	end
-end
-
--- Parameters:
--- name: Name of the node, same as when the node is registered with 'minetest.register_node'
--- categories: Array of tags or categories, that classifies nodes together
--- properties: An array of functions in the following format:
---   {
---		[property_name] = function(self, args)
---   }
--- operation: A function that is called when the instruction 'npc:env:node:operate' is executed
--- the function is given two parameters: 'self', and a table of arguments 'args'
-npc.env.register_node = function(name, groups, properties, operation)
-	if node_table[name] ~= nil then
-		return false
-	else
-		node_table[name] = {
-			groups = groups,
-			properties = properties,
-			operation = operation
-		}
-		return true
-	end
-
-	-- Insert into group_to_name_map - this is used when searching
-	-- for nodes of a specific group
-	for i = 1, #groups do
-		-- Create group if it doesn't exists
-		if not node_group_name_map[groups[i]] then
-			node_group_name_map[groups[i]] = {}
-		end
-		node_group_name_map[groups[i]][#node_group_name_map[groups[i]] + 1] = name
-	end
-end
-
--- Parameters:
--- The "animation_name" parameter is the name of the animation
--- The object "animation_params" is like this:
--- {
---		start_frame: integer, required, the starting frame of the animation of the blender model
---		end_frame: integer, required, the ending frame of the animation of the blender model
---		speed: integer, required, the speed in which the animation will be played
---		blend: integer, optional, animation blend is broken, defaults to 0
---		loop: boolean, optional, default is true. If false, should specify "animation_after"
---		animation_after: string, optional, default is "stand". Name of animation that will be played
---   			  		  when this animation is over.
--- }
-npc.model.register_animation = function(model_name, animation_name, animation_params)
-	-- Initialize if not present
-	if (not models[model_name]) then
-		models[model_name] = {
-			animations = {}
-		}
-	end
-
-	models[model_name].animations[animation_name] = animation_params
-end
-
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Core Instructions
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Variable instructions
-npc.proc.register_instruction("npc:var:get", function(self, args)
-	_npc.dsl.get_var(self, args.key)
-end)
-
-npc.proc.register_instruction("npc:var:set", function(self, args)
-	_npc.dsl.set_var(self, args.key, args.value, args.userdata_type)
-end)
-
--- Control instructions
-npc.proc.register_instruction("npc:jump", function(self, args)
-	if args.offset == true then
-		self.process.current.instruction = self.process.current.instruction + args.pos
-	else
-		self.process.current.instruction = args.pos
-	end
-
-	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
-end)
-
-npc.proc.register_instruction("npc:jump_if", function(self, args)
-	local condition = args.expr
-	if args.negate == true then condition = not condition end
-	if condition == true then
-		if args.offset == true then
-			self.process.current.instruction = self.process.current.instruction + args.pos
-		else
-			self.process.current.instruction = args.pos
-		end
-	end
-end)
-
-npc.proc.register_instruction("npc:break", function(self, args)
-	for i = self.process.current.instruction + 1, #program_table[self.process.current.name].instructions do
-		if program_table[self.process.current.name].instructions[i].loop_end then
-			minetest.log("Found last instruction of loop to be: "..dump(program_table[self.process.current.name].instructions[i]))
-			minetest.log("At pos: "..dump(i))
-			self.process.current.instruction = i
-			break
-		end
-	end
-end)
-
-npc.proc.register_instruction("npc:set_proc_interval", function(self, args)
-	self.timers.proc_int = args.value
-end)
-
-npc.proc.register_instruction("npc:get_proc_interval", function(self, args)
-	return self.timers.proc_int
-end)
-
--- Function instructions
-npc.proc.register_instruction("npc:call", function(self, args)
-
-	-- Insert entry into call stack
-	if not self.data.proc[self.process.current.id]["_call_stack"] then
-		self.data.proc[self.process.current.id]["_call_stack"] = {}
-	end
-
-	local top = #self.data.proc[self.process.current.id]["_call_stack"] + 1
-	self.data.proc[self.process.current.id]["_call_stack"][top] = {
-		key = args.key,
-		index = args.index
-	}
-
-	self.process.current.instruction = args.index
-
-end)
-
-npc.proc.register_instruction("npc:return", function(self, args)
-
-	local top = #self.data.proc[self.process.current.id]["_call_stack"]
-	local stack_entry = self.data.proc[self.process.current.id]["_call_stack"][top]
-
-	-- Set the variable, if needed
-	if args.value and stack_entry.key then
-		_npc.dsl.set_var(self, stack_entry.key, args.value)
-	end
-
-	-- Change current instruction pointer
-	self.process.current.instruction = stack_entry.index
-
-	-- Remove from stack
-	self.data.proc[self.process.current.id]["_call_stack"][top] = nil
-
-end)
-
-npc.proc.register_instruction("npc:execute", function(self, args)
-	local processed_args = {}
-	if args.args then
-		for arg_key,arg_value in pairs(args.args) do
-			processed_args[arg_key] = _npc.dsl.evaluate_argument(
-				self, arg_value, raw_args, self.data.proc[self.process.current.id])
-		end
-	end
-	self.process.current.called_execute = true
-	npc.proc.execute_program(self, args.name, processed_args)
-    self.process.program_changed = true
-end)
-
-npc.proc.register_instruction("npc:set_state_process", function(self, args)
-	npc.proc.set_state_process(self, args.name, args.args)
-end)
-
--- Timer instructions
-npc.proc.register_instruction("npc:timer:register", function(self, args)
-	if self.data.proc[self.process.current.id] == nil then
-		self.data.proc[self.process.current.id] = {}
-	end
-
-	if self.data.proc[self.process.current.id]["_timers"] == nil then
-		self.data.proc[self.process.current.id]["_timers"] = {}
-	end
-
-	self.data.proc[self.process.current.id]["_timers"][args.name] = {
-		interval = args.interval,
-		value = args.initial_value or 0,
-		is_running = false,
-		execution_count = 0,
-		max_execution_count = args.times_to_run,
-		function_index = args.timer_func_index
-	}
-end)
-
-npc.proc.register_instruction("npc:timer:start", function(self, args)
-	assert(args.name, "No timer name provided")
-	self.data.proc[self.process.current.id]["_timers"][args.name].is_running = true
-end)
-
-npc.proc.register_instruction("npc:timer:stop", function(self, args)
-	assert(args.name, "No timer name provided")
-	self.data.proc[self.process.current.id]["_timers"][args.name].is_running = false
-end)
-
-npc.proc.register_instruction("npc:timer:instr:start", function(self, args)
-	self.timers.instr_timer = 0
-end)
-
-npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
-	self.timers.instr_timer = nil
-end)
-
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Built-in instructions
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
-
------------------------------------------------------------------------------------
--- Environment-related instructions
------------------------------------------------------------------------------------
-
 npc.proc.register_instruction("npc:env:node:operate",
 	_npc.env.node_operate)
 
@@ -1529,6 +1588,11 @@ npc.proc.register_instruction("npc:env:prioritize", function(self, args)
 end)
 
 npc.proc.register_instruction("npc:model:set_animation", _npc.model.set_animation)
+
+-----------------------------------------------------------------------------------
+-- Object instructions
+-----------------------------------------------------------------------------------
+
 
 -----------------------------------------------------------------------------------
 -- Movement instructions
