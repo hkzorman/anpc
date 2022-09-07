@@ -97,16 +97,50 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				result = self.process.current.args[expression_values[2]]
 			elseif storage_type == "@global" then
 				result = self.data.global[expression_values[2]]
+			elseif storage_type == "@table" then
+				-- Supported operations:
+				-- @table.length.<table> - gets the length of an array
+				-- @table.get.<table>.<table index> - gets element of an array
+				-- @table.add.<table>.<element>.<position> 
+				-- @table.remove.<table>.<position>
+				-- @table.set.<table>.<element>.<position>
+				-- In the above, <table> can be any variable e.g. @local.something
+				local value = _npc.dsl.evaluate_argument(self, expression_values[3].."."..expression_values[4])
+				if expression_values[2] == "length" then
+					local count = 0
+					for _ in pairs(value) do count = count + 1 end
+					return count
+				elseif expression_values[2] == "get" then
+					return value[expression_values[5]]
+				elseif expression_values[2] == "add" then
+					if #expression_values == 6 then
+						return table.insert(value, expression_values[6], expression_values[5])
+					else
+						return table.insert(value, expression_values[5])
+					end
+				elseif expression_values[2] == "remove" then
+					if #expression_values == 5 then
+						return table.remove(value, expression_values[5])
+					end
+					return table.remove(value)
+				elseif expression_values[2] == "set" then
+					local result = value[expression_values[6]]
+					value[expression_values[6]] = expression_values[5]
+					return result
+				end
 			elseif storage_type == "@env" then
 				result = self.data.env[expression_values[2]]
-			elseif storage_type == "@obj" then
+			elseif storage_type == "@objs" then
 				-- Supports passing in an index, a tracking ID or "all"
 				-- NOTE: Tracking ID will only work with objects the NPC
 				-- is nearby
 				if type(expression_values[2]) == "string" then
 					if expression_values[2] == "all" then
 						return self.data.env.objects
-					else
+					elseif expression_values[2]:sub(1,1) == "@" then
+						local index = _npc.dsl.evaluate_argument(self, expression_values[2].."."..expression_values[3])
+						return self.data.env.objects[index]
+					end
 						for i = 1, #self.data.env.objects do
 							if self.data.env.objects[i]
 								and self.data.env.objects[i]:get_luaentity()
@@ -116,8 +150,8 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 							end
 						end
 					end
-				else
-					result = self.data.env.objects[expression_values[2]]
+				elseif type(expression_values[2]) == "number" then
+					return self.data.env.objects[index]
 				end
 			elseif storage_type == "@random" then
 				return math.random(expression_values[2], expression_values[3])
@@ -958,10 +992,9 @@ end)
 -----------------------------------------------------------------------------------
 -- Utilities instructions
 -----------------------------------------------------------------------------------
-npc.proc.register_instruction("npc:length", function(self, args)
-	local result = 0
-	for _ in pairs(args.value) do result = result + 1 end
-	return result
+npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
+	local obj = args.object
+	return obj:get_pos()
 end)
 
 npc.proc.register_instruction("npc:distance_to", function(self, args)
