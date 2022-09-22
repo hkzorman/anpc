@@ -35,7 +35,6 @@ local mods = minetest.get_modnames()
 local enable_debug = false
 for i = 1, #mods do
 	if mods[i] == "anpc_dev" then
-		enable_debug = tr
 		npc.proc.program_table = program_table
 		npc.proc.instruction_table = instruction_table
 	end
@@ -49,6 +48,7 @@ local models = {}
 
 -- At least left and op are necessary
 _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
+	--minetest.log("Got expr: "..dump(expr))
 	local operator = expr.op
 	local source = _npc.dsl.evaluate_argument(self, expr.left, args)
 	local target = _npc.dsl.evaluate_argument(self, expr.right, args)
@@ -82,22 +82,78 @@ _npc.dsl.evaluate_boolean_expression = function(self, expr, args)
 	end
 end
 
+-- This function parses in-line arguments, mostly used to get/set variables
+-- These expressions have to be evaluated at run time, so this function is called at run time only.
+-- Supported operations:
+--   - Get variables from:
+--     - local: local program variables, e.g. @local.var_name
+--     - global: global variables, to the NPC, e.g. @global.var_name
+--     - args: access the arguments of the current program, e.g. @args.arg_name
+--   - You can also access variable using another variable:
+--     - @local.@local.var_name
+--   - Supports tables
+--     - Constant table element: @local.tbl_name["some_key_name"]
+--     - Variable table element: @local.tbl_name[@local.for_index]
+--     - Table length: @local.tbl_name.length
+--   - Object expressions:
+--     - @objs.all: returns a table with all objects nearby the NPC
+--     - @objs.get[<tracking_id>]: returns object with tracking ID = <tracking_id>
+--     - @objs.get[@local.for_index]: returns object with index or tracking ID @local.for_index
+--	 - Time expression:
+--     - @time: Returns minetest local time * 24000
 _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 	if type(expr) == "string" then
 		if expr:sub(1,1) == "@" then
 			local expression_values = string.split(expr, ".")
 			local storage_type = expression_values[1]
 			local result = nil
+			local second_arg = nil
+			local third_arg = nil
+			local orig_key = nil
+			local key = nil
+
+			local bracket_start = string.find(expr, "%[")
+			local bracket_end = string.find(expr, "%]")
+			if bracket_start ~= nil and bracket_end ~= nil then
+				second_arg = expr:sub(1, bracket_start - 1)
+				orig_key = expr:sub(bracket_start + 1, bracket_end - 1)
+				if orig_key:sub(1,1) == "@" then
+					key = _npc.dsl.evaluate_argument(self, orig_key)
+				else
+					key = orig_key
+				end
+			else
+				if expression_values[2] then
+					if expression_values[2]:sub(1,1) == "@" then
+						second_arg = _npc.dsl.evaluate_argument(self, expression_values[2]..expression_values[3])
+					else
+						second_arg = expression_values[2]
+					end
+				end
+			end
 			
+			-- Get third argument, `length` if provided
+			-- Possible usecases:
+			--   - @local.my_array.length
+			if #expression_values > 2 then
+				if #expression_values == 3 then
+					third_arg = expression_values[3]
+				elseif #expression_values == 4 then
+					third_arg = expression_values[4]
+				end
+			end
+				
 			if storage_type == "@local" then
 				if self.data.proc[self.process.current.id] then
-					result = _npc.dsl.get_var(self, expression_values[2])
+					result = _npc.dsl.get_var(self, second_arg)
 				end
 			elseif storage_type == "@args" then
-				result = self.process.current.args[expression_values[2]]
+				result = self.process.current.args[second_arg]
 			elseif storage_type == "@global" then
-				result = self.data.global[expression_values[2]]
-			elseif storage_type == "@table" then
+				result = self.data.global[second_arg]
+			elseif storage_type == "@temp" then
+				result = self.data.temp[second_arg]
+			--elseif storage_type == "@table" then
 				-- Supported operations:
 				-- @table.length.<table> - gets the length of an array
 				-- @table.get.<table>.<table index> - gets element of an array
@@ -105,56 +161,57 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				-- @table.remove.<table>.<position>
 				-- @table.set.<table>.<element>.<position>
 				-- In the above, <table> can be any variable e.g. @local.something
-				local value = _npc.dsl.evaluate_argument(self, expression_values[3].."."..expression_values[4])
-				if expression_values[2] == "length" then
-					local count = 0
-					for _ in pairs(value) do count = count + 1 end
-					return count
-				elseif expression_values[2] == "get" then
-					return value[expression_values[5]]
-				elseif expression_values[2] == "add" then
-					if #expression_values == 6 then
-						return table.insert(value, expression_values[6], expression_values[5])
-					else
-						return table.insert(value, expression_values[5])
-					end
-				elseif expression_values[2] == "remove" then
-					if #expression_values == 5 then
-						return table.remove(value, expression_values[5])
-					end
-					return table.remove(value)
-				elseif expression_values[2] == "set" then
-					local result = value[expression_values[6]]
-					value[expression_values[6]] = expression_values[5]
-					return result
-				end
+				--local value = _npc.dsl.evaluate_argument(self, expression_values[3].."."..expression_values[4])
+				--if expression_values[2] == "length" then
+				--	local count = 0
+				--	for _ in pairs(value) do count = count + 1 end
+				--	return count
+				--elseif expression_values[2] == "get" then
+				--	return value[expression_values[5]]
+				--elseif expression_values[2] == "add" then
+				--	if #expression_values == 6 then
+				--		return table.insert(value, expression_values[6], expression_values[5])
+				--	else
+				--		return table.insert(value, expression_values[5])
+				--	end
+				--elseif expression_values[2] == "remove" then
+				--	if #expression_values == 5 then
+				--		return table.remove(value, expression_values[5])
+				--	end
+				--	return table.remove(value)
+				--elseif expression_values[2] == "set" then
+				--	local result = value[expression_values[6]]
+				--	value[expression_values[6]] = expression_values[5]
+				--	return result
+				--end
 			elseif storage_type == "@env" then
-				result = self.data.env[expression_values[2]]
+				result = self.data.env[second_arg]
 			elseif storage_type == "@objs" then
+				result = self.data.env.objects
 				-- Supports passing in an index, a tracking ID or "all"
 				-- NOTE: Tracking ID will only work with objects the NPC
 				-- is nearby
-				if type(expression_values[2]) == "string" then
-					if expression_values[2] == "all" then
-						return self.data.env.objects
-					elseif expression_values[2]:sub(1,1) == "@" then
-						local index = _npc.dsl.evaluate_argument(self, expression_values[2].."."..expression_values[3])
-						return self.data.env.objects[index]
-					end
+				
+				if second_arg == "all" then
+					result = self.data.env.objects
+				elseif second_arg == "get" then
+					-- Return object by number index
+					if type(key) == "number" then
+						return self.data.env.objects[key]
+					else
 						for i = 1, #self.data.env.objects do
 							if self.data.env.objects[i]
 								and self.data.env.objects[i]:get_luaentity()
 								and self.data.env.objects[i]:get_luaentity().anpc_track_id
-								and self.data.env.objects[i]:get_luaentity().anpc_track_id == expression_values[2] then
+								and self.data.env.objects[i]:get_luaentity().anpc_track_id == key then
 								return self.data.env.objects[i]
 							end
 						end
 					end
-				elseif type(expression_values[2]) == "number" then
-					return self.data.env.objects[index]
 				end
-			elseif storage_type == "@random" then
-				return math.random(expression_values[2], expression_values[3])
+			--elseif storage_type == "@random" then
+				--if expression_values[2] 
+			--	return math.random(expression_values[2], expression_values[3])
 			elseif storage_type == "@time" then
 				return 24000 * minetest.get_timeofday()
 			-- This might be temporary
@@ -169,8 +226,21 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 					return self.object:get_yaw()
 				end
 			end
-			if #expression_values > 2 then
-				return result[tonumber(expression_values[3])]
+			
+			-- Check if there's a third argument.
+			-- Supported third argument:
+			--   - `length`: if object is a table, returns length of table
+			--minetest.log("There is a third arg? "..dump(third_arg))
+			if third_arg then
+				if third_arg == "length" then
+					local count = 0
+					for _ in pairs(result) do count = count + 1 end
+					return count
+				end
+			end
+			
+			if key and type(result) == "table" then
+				return result[key]
 			else
 				return result
 			end
@@ -186,16 +256,61 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 end
 
 -- TODO: Might not be needed
+-- TODO: We probably want to remove this to discourage use of in-line Lua
+--       on anpcscript programs
 npc.eval = function(self, expr, args, local_vars)
 	return _npc.dsl.evaluate_argument(self, expr, args, local_vars)
 end
 
 -- Nil-safe set variable function, plus handling of userdata variables
-_npc.dsl.set_var = function(self, key, value, userdata_type)
-	--minetest.log("Part: before"..dump(self.data.proc[self.process.current.id]))
-	if self.data.proc[self.process.current.id] == nil then
-		self.data.proc[self.process.current.id] = {}
+_npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
+	local storage = nil
+	local subkey = nil
+	local orig_subkey = key
+	
+	minetest.log("Got key: "..dump(key))
+	minetest.log("Got value: "..dump(value))
+	
+	-- TODO: Objects are being saved in local storage - this must not be
+	if storage_type == nil and key and key:sub(1,1) == "@" then
+		local index = string.find(key, "%.")
+		storage_type = key:sub(2, index - 1)
+		key = key:sub(index + 1, #key)
+	elseif storage_type == nil then
+		-- Assume local storage
+		storage_type = "local"
 	end
+	
+	-- Support assigning values to array elements
+	local bracket_start = string.find(key, "%[")
+	local bracket_end = string.find(key, "%]")
+	if bracket_start ~= nil and bracket_end ~= nil then
+		orig_subkey = key:sub(bracket_start + 1, bracket_end - 1)
+		key = key:sub(1, bracket_start - 1)
+		if orig_subkey:sub(1,1) == "@" then
+			subkey = _npc.dsl.evaluate_argument(self, orig_subkey)
+		else
+			subkey = orig_subkey
+		end
+	end
+	
+	if storage_type == "global" then
+		storage = self.data.global
+	elseif storage_type == "temp" then
+		storage = self.data.temp
+	elseif storage_type == "args" then
+		storage = self.process.current.args
+	elseif storage_type == "local" then
+		storage = self.data.proc[self.process.current.id]
+		if storage == nil then
+			self.data.proc[self.process.current.id] = {}
+			storage = self.data.proc[self.process.current.id]
+		end
+	end
+	--minetest.log("Part: before"..dump(self.data.proc[self.process.current.id]))
+	--if self.data.proc[self.process.current.id] == nil then
+	--	self.data.proc[self.process.current.id] = {}
+	--end
 
 	if type(value) == "userdata" then
 		if userdata_type then
@@ -205,7 +320,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 					-- Check if player
 					if obj:is_player() then
 						-- Store tracking record
-						self.data.proc[self.process.current.id][key] = {
+						storage[key] = {
 							userdata_type = "object",
 							obj_type = "player",
 							obj_attr = obj:get_player_name()
@@ -219,7 +334,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 
 						obj:get_luaentity().anpc_track_id = id
 						-- Store tracking record
-						self.data.proc[self.process.current.id][key] = {
+						local tracking_record = {
 							userdata_type = "object",
 							obj_type = "object",
 							obj_attr = {
@@ -227,6 +342,12 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 								distance = vector.distance(self.object:get_pos(), obj:get_pos()) * 3
 							}
 						}
+						
+						if subkey and type(storage[key]) == "table" then
+							storage[key][subkey] = tracking_record
+						else
+							storage[key] = tracking_record
+						end
 
 						-- Store actual object so that lookups are simpler
 						self.data.temp[id] = obj
@@ -241,7 +362,14 @@ _npc.dsl.set_var = function(self, key, value, userdata_type)
 		end
 	end
 
-	self.data.proc[self.process.current.id][key] = value
+	--minetest.log("This is the key: "..dump(key))
+	--minetest.log("This is the process ID: "..self.process.current.id)
+
+	if subkey and type(storage[key]) == "table" then
+		storage[key][subkey] = value
+	else
+		storage[key] = value
+	end
 end
 
 _npc.dsl.get_var = function(self, key)
@@ -503,6 +631,9 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		-- to the relevant one - this is done because after the jump
 		-- instruction is executed, the instruction counter will be increased
 		local loop_start = #instruction_list + original_list_size
+		minetest.log("On a for loop")
+		minetest.log(dump(loop_start))
+		minetest.log(dump(instruction_list))
 		-- Insert all loop instructions
 		for i = 1, #instruction.args.loop_instructions do
 			assert(not instruction.args.loop_instructions[i].declare,
@@ -698,6 +829,10 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		instruction_list[#instruction_list + 1] = instruction
 	end
 
+	if instruction.name == "npc:for" then
+		minetest.log("instruction_list: "..dump(instruction_list))
+	end
+
 	return instruction_list, is_function
 end
 
@@ -752,11 +887,8 @@ npc.proc.register_program = function(name, raw_instruction_list, source_location
 		end
 
 		minetest.log("Registered and compiled program '"..dump(name).."' with initial instruction: "..dump(initial_instruction)..":")
-		for i = 1, #instruction_list do
-			minetest.log("["..dump(i).."] = "..dump(instruction_list[i]))
-		end
 
-		--minetest.log(dump(program_table))
+		--minetest.log(dump(program_table[name]))
 		return true
 	end
 end
@@ -847,7 +979,7 @@ npc.proc.register_instruction("npc:var:get", function(self, args)
 end)
 
 npc.proc.register_instruction("npc:var:set", function(self, args)
-	_npc.dsl.set_var(self, args.key, args.value, args.userdata_type)
+	_npc.dsl.set_var(self, args.key, args.value, args.userdata_type, args.storage_type)
 end)
 
 -- Control instructions
@@ -997,14 +1129,23 @@ npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
 	return obj:get_pos()
 end)
 
+npc.proc.register_instruction("npc:random", function(self, args)
+	if args.start and args["end"] then
+		return math.random(args.start, args["end"])
+	end
+end)
+
 npc.proc.register_instruction("npc:distance_to", function(self, args)
 	if args.x and args.y and args.z then
 		local source = self.object:getpos()
 		local target = {x = args.x, y = args.y, z = args.z}
 		local result = vector.distance(source, target)
-		if args.round then return vector.round(result) else return round end
+		if args.round then return vector.round(result) else return result end
 	elseif args.object then
-		
+		local source = self.object:getpos()
+		local target = args.object:getpos()
+		local result = vector.distance(source, target)
+		if args.round then return vector.round(result) else return result end
 	end
 end)
 
@@ -1070,7 +1211,7 @@ end
 
 -- Returns a position from where a NPC can approach or access another position.
 _npc.env.node_get_accessing_pos = function(self, args)
-
+	minetest.log("Args: "..dump(args))
 	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
 	minetest.log("Force an accessing node? "..dump(args.force))
 
@@ -1980,20 +2121,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 end)
 
------------------------------------------------------------------------------------
--- Built-in high-latency tasks
------------------------------------------------------------------------------------
 
-npc.proc.register_high_latency_task("npc:move:jump", function(self, dtime, args)
-	local vel = self.object:get_velocity()
-	if (vel.y == 0) then
-		self.object:set_velocity({x=0, y=0, z=0})
-		-- Landed
-		return true
-	end
-	-- Not landed yet
-	return false
-end)
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -2041,8 +2169,7 @@ npc.proc.enqueue_program = function(self, name, args)
 end
 
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
-
-	assert(instruction_table[name] ~= nil)
+	assert(instruction_table[name] ~= nil, "Unknown instruction: "..name)
 
 	minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
 
@@ -2063,6 +2190,7 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 	local result = instruction_table[name](self, processed_args)
 	if (result_key) then
 		minetest.log("Instruction returned: "..dump(result))
+		minetest.log("This is the result_key: "..dump(result_key))
 		_npc.dsl.set_var(self, result_key, result)
 	end
 
@@ -2138,161 +2266,7 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 
 	-- TODO: Key is 100, but queue_head = 1. It happened.
 	self.process.key = (self.process.key + 1) % 100
-end
-
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Built-in programs
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
-
-npc.proc.register_program("builtin:idle", {
-	{name = "npc:move:stand"},
-	{name = "npc:for", args = {
-		initial_value = 1,
-		step_increase = 1,
-		expr = {
-			left = "@local.for_index",
-			op = "<=",
-			right = function(self)
-				return #self.data.env.objects
-			end
-		},
-		loop_instructions = {
-			{name = "npc:if", args = {
-				expr = function(self, args)
-					-- Random 50% chance
-					local chance = math.random(1, 100)
-					if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
-						return false
-					end
-
-					local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
-					if object then
-						local object_pos = object:get_pos()
-						local self_pos = self.object:get_pos()
-						return vector.distance(object_pos, self_pos) < npc.eval(self, "@args.ack_nearby_objs_dist")
-							and vector.distance(object_pos, self_pos) > 0
-					end
-					return false
-				end,
-				true_instructions = {
-					{name = "npc:while", args = {time = 5, loop_instructions = {
-						{name = "npc:move:rotate", args={
-							target_pos = function(self, args)
-								local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
-								if object then
-									return object:get_pos()
-								end
-							end
-						}},
-					}},
-					{name = "npc:break"}}
-				}}}
-		}}}
-})
-
-npc.proc.register_program("builtin:walk_to_pos", {
-	{name = "npc:var:set", args = {
-		key = "has_reached_pos",
-		value = false
-	}},
-	{key = "end_pos", name = "npc:env:node:get_accessing_pos", args = {
-		pos = "@args.end_pos",
-		force = "@args.force_accessing_node"
-	}},
-	{name = "npc:while", args = {
-		expr = {
-			left = "@local.has_reached_pos",
-			op   = "==",
-			right = false
-		},
-		loop_instructions = {
-			{key = "has_reached_pos", name = "npc:move:walk_to_pos", args = {
-				target_pos = "@local.end_pos",
-				original_target_pos = "@args.end_pos",
-				check_end_pos_walkable = false
-			}},
-			{name = "npc:if", args = {
-				expr = {
-					left = "@local.has_reached_pos",
-					op   = "==",
-					right = nil
-				},
-				true_instructions = {
-					{name = "npc:break"}
-				}
-			}}
-		}
-	}}
-})
-
-npc.proc.register_program("builtin:follow", {
-	{name="npc:set_proc_interval", args={value = 0.25}},
-	{name = "npc:var:set", args = { key = "target_pos", value = function(self, args) 
-		local object_to_follow = self.process.current.args.object
-		if (object_to_follow and object_to_follow:get_pos()) then
-			return _npc.env.node_get_accessing_pos(self, {pos = vector.round(object_to_follow:get_pos())})
-		end
-	end}},
-	{name = "npc:if", args = {
-		expr = {
-			left  = "@local.target_pos",
-			op    = "~=",
-			right = nil
-		},
-		true_instructions = {
-			-- Check if NPC arrived to the expected position
-			{name = "npc:if", args = {
-				expr = function(self, args, local_v)
-					return vector.equals(vector.round(self.object:get_pos()), local_v.target_pos)
-				end,
-				true_instructions = {
-					-- Stand
-					{name = "npc:move:stand", args = {}}
-				},
-				false_instructions = {
-					-- Move to target pos
-					{name = "npc:execute", args = {
-						name = "builtin:walk_to_pos",
-						args = {
-							end_pos = "@local.target_pos",
-						}
-					}}
-				}
-			}}
-		}	
-	}
-}})
-	
-
------------------------------------------------------------------------------------
--- Node registrations
------------------------------------------------------------------------------------
-
-npc.env.register_node("doors:door_wood_a", {"openable", "doors"},
-	{["is_open"] = function(self, args)
-		return false
-	end},
-	function(self, args)
-		local node = minetest.get_node(args.pos)
-		local clicker = self
-		clicker.is_player = function() return true end
-    	clicker.get_player_name = function(self) return "npc" end
-		minetest.registered_nodes["doors:door_wood_a"].on_rightclick(args.pos, node, clicker, nil, nil)
-	end)
-
-npc.env.register_node("doors:door_wood_b", {"openable", "doors"},
-	{["is_open"] = function(self, args)
-		return true
-	end},
-	function(self, args)
-		local node = minetest.get_node(args.pos)
-		local clicker = self
-		clicker.is_player = function() return true end
-    	clicker.get_player_name = function(self) return "npc" end
-		minetest.registered_nodes["doors:door_wood_b"].on_rightclick(args.pos, node, clicker, nil, nil)
-	end)
+end	
 
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
@@ -2300,6 +2274,11 @@ npc.env.register_node("doors:door_wood_b", {"openable", "doors"},
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 npc.do_step = function(self, dtime)
+	
+	-- Support for debug
+	if self.debug and self.debug.pause then
+		return
+	end
 
 	-------------------------------------------------------------------------------
 	-- Timers
@@ -2308,6 +2287,7 @@ npc.do_step = function(self, dtime)
 	self.timers.node_below_value = self.timers.node_below_value + dtime
 	self.timers.objects_value = self.timers.objects_value + dtime
 	self.timers.proc_value = self.timers.proc_value + dtime
+	
 	-- Check node below NPC
 	if (self.timers.node_below_value > self.timers.node_below_value) then
 		local current_pos = self.object:get_pos()
@@ -2325,7 +2305,8 @@ npc.do_step = function(self, dtime)
 	-- Check all entries in the schedule. Execute all where:
 	--   earliest_start_time <= current_time <= latest_start_time
 	-------------------------------------------------------------------------------
-	--TODO: DO
+	--TODO: DO or not do?
+	-- A schedule can be done using a process.
 	-- Get current time
 	--local current_time = 24000 * minetest.get_timeofday()
 	--if (current_time <= 500)
@@ -2477,11 +2458,17 @@ npc.do_step = function(self, dtime)
 				minetest.log("Process now: "..dump(self.process))
 				return
 			end
+			minetest.log("Current instruction: "..dump(instruction))
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
             --minetest.log("Next 2")
             if self.process.program_changed == false then
                 self.process.current.instruction = self.process.current.instruction + 1
             else self.process.program_changed = false end
+		end
+		
+		-- Update debug screen
+		if self.debug and self.debug.show_debugger == true then
+			npc_dev.show_debug_formspec(npc_dev.source, self.object)
 		end
 	end
 
@@ -2494,6 +2481,7 @@ npc.on_activate = function(self, staticdata)
 		self["timers"] = minetest.deserialize(cols[2])
 		self["process"] = minetest.deserialize(cols[3])
 		self["data"] = minetest.deserialize(cols[4])
+		self["debug"] = minetest.deserialize(cols[5])
 		-- Restore objects
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 		--minetest.log("Data: "..dump(self))
@@ -2543,6 +2531,11 @@ npc.on_activate = function(self, staticdata)
 			temp = {},
 			schedule = {}
 		}
+		
+		self.debug = {
+			show_debugger = false,
+			pause = false
+		}
 
 		-- These values should be customizable, but these are default
 		self.data.env.view_range = 12
@@ -2577,11 +2570,167 @@ npc.get_staticdata = function(self)
 		--minetest.log("User data: "..dump(self.data))
 		result = result..minetest.serialize(self.data).."|"
 	end
+	
+	if self.debug then
+		result = result..minetest.serialize(self.debug).."|"
+	end
 
 	return result
 
 end
 
+npc.set_debug = function(self, is_debug)
+	if not self.debug then
+		self.debug = {}
+	end
+	
+	if is_debug == false then
+		self.timers.proc_int = 0.5
+	else
+		self.timers.proc_int = 1
+	end
+		
+	self.debug.show_debugger = is_debug
+end
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-- Built-in programs
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+npc.proc.register_program("builtin:idle", {
+	{name = "npc:move:stand"},
+	{name = "npc:for", args = {
+		initial_value = 1,
+		step_increase = 1,
+		expr = {
+			left = "@local.for_index",
+			op = "<=",
+			right = function(self)
+				return #self.data.env.objects
+			end
+		},
+		loop_instructions = {
+			{name = "npc:if", args = {
+				expr = function(self, args)
+					-- Random 50% chance
+					local chance = math.random(1, 100)
+					if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
+						return false
+					end
+
+					local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
+					if object then
+						local object_pos = object:get_pos()
+						local self_pos = self.object:get_pos()
+						return vector.distance(object_pos, self_pos) < npc.eval(self, "@args.ack_nearby_objs_dist")
+							and vector.distance(object_pos, self_pos) > 0
+					end
+					return false
+				end,
+				true_instructions = {
+					{name = "npc:while", args = {time = 5, loop_instructions = {
+						{name = "npc:move:rotate", args={
+							target_pos = function(self, args)
+								local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
+								if object then
+									return object:get_pos()
+								end
+							end
+						}},
+					}},
+					{name = "npc:break"}}
+				}}}
+		}}}
+})
+
+npc.proc.register_program("builtin:walk_to_pos", {
+	{name = "npc:var:set", args = {
+		key = "has_reached_pos",
+		value = false
+	}},
+	{key = "end_pos", name = "npc:env:node:get_accessing_pos", args = {
+		pos = "@args.end_pos",
+		force = "@args.force_accessing_node"
+	}},
+	{name = "npc:while", args = {
+		expr = {
+			left = "@local.has_reached_pos",
+			op   = "==",
+			right = false
+		},
+		loop_instructions = {
+			{key = "has_reached_pos", name = "npc:move:walk_to_pos", args = {
+				target_pos = "@local.end_pos",
+				original_target_pos = "@args.end_pos",
+				check_end_pos_walkable = false
+			}},
+			{name = "npc:if", args = {
+				expr = {
+					left = "@local.has_reached_pos",
+					op   = "==",
+					right = nil
+				},
+				true_instructions = {
+					{name = "npc:break"}
+				}
+			}}
+		}
+	}}
+})
+
+npc.proc.register_program("builtin:follow", {
+	{name="npc:set_proc_interval", args={value = 0.25}},
+	{name = "npc:var:set", args = { key = "target_pos", value = function(self, args) 
+		local object_to_follow = self.process.current.args.object
+		if (object_to_follow and object_to_follow:get_pos()) then
+			return _npc.env.node_get_accessing_pos(self, {pos = vector.round(object_to_follow:get_pos())})
+		end
+	end}},
+	{name = "npc:if", args = {
+		expr = {
+			left  = "@local.target_pos",
+			op    = "~=",
+			right = nil
+		},
+		true_instructions = {
+			-- Check if NPC arrived to the expected position
+			{name = "npc:if", args = {
+				expr = function(self, args, local_v)
+					return vector.equals(vector.round(self.object:get_pos()), local_v.target_pos)
+				end,
+				true_instructions = {
+					-- Stand
+					{name = "npc:move:stand", args = {}}
+				},
+				false_instructions = {
+					-- Move to target pos
+					{name = "npc:execute", args = {
+						name = "builtin:walk_to_pos",
+						args = {
+							end_pos = "@local.target_pos",
+						}
+					}}
+				}
+			}}
+		}	
+	}
+}})
+
+-----------------------------------------------------------------------------------
+-- Built-in high-latency tasks
+-----------------------------------------------------------------------------------
+
+npc.proc.register_high_latency_task("npc:move:jump", function(self, dtime, args)
+	local vel = self.object:get_velocity()
+	if (vel.y == 0) then
+		self.object:set_velocity({x=0, y=0, z=0})
+		-- Landed
+		return true
+	end
+	-- Not landed yet
+	return false
+end)
 
 ---------------------------------------------------------------------
 -- WARNING: Below are stuff for testing. Remove from final version
@@ -2606,5 +2755,33 @@ minetest.register_craftitem("anpc:npc_spawner", {
 		end
 	end
 })
+
+-----------------------------------------------------------------------------------
+-- Node registrations
+-----------------------------------------------------------------------------------
+
+npc.env.register_node("doors:door_wood_a", {"openable", "doors"},
+	{["is_open"] = function(self, args)
+		return false
+	end},
+	function(self, args)
+		local node = minetest.get_node(args.pos)
+		local clicker = self
+		clicker.is_player = function() return true end
+    	clicker.get_player_name = function(self) return "npc" end
+		minetest.registered_nodes["doors:door_wood_a"].on_rightclick(args.pos, node, clicker, nil, nil)
+	end)
+
+npc.env.register_node("doors:door_wood_b", {"openable", "doors"},
+	{["is_open"] = function(self, args)
+		return true
+	end},
+	function(self, args)
+		local node = minetest.get_node(args.pos)
+		local clicker = self
+		clicker.is_player = function() return true end
+    	clicker.get_player_name = function(self) return "npc" end
+		minetest.registered_nodes["doors:door_wood_b"].on_rightclick(args.pos, node, clicker, nil, nil)
+	end)
 
 
