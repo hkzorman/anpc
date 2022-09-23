@@ -271,7 +271,6 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 	minetest.log("Got key: "..dump(key))
 	minetest.log("Got value: "..dump(value))
 	
-	-- TODO: Objects are being saved in local storage - this must not be
 	if storage_type == nil and key and key:sub(1,1) == "@" then
 		local index = string.find(key, "%.")
 		storage_type = key:sub(2, index - 1)
@@ -281,6 +280,9 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 		storage_type = "local"
 	end
 	
+	minetest.log("Selected storage: "..dump(storage_type))
+	
+	-- TODO: This doesn't work, I think
 	-- Support assigning values to array elements
 	local bracket_start = string.find(key, "%[")
 	local bracket_end = string.find(key, "%]")
@@ -307,11 +309,14 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 			storage = self.data.proc[self.process.current.id]
 		end
 	end
-	--minetest.log("Part: before"..dump(self.data.proc[self.process.current.id]))
-	--if self.data.proc[self.process.current.id] == nil then
-	--	self.data.proc[self.process.current.id] = {}
-	--end
-
+	
+	-- TODO: Fix this hack. We need somehow to understand what kind of userdata
+	-- value is being passed in. Probably the best idea is to have someway to 
+	-- specify the userdata type in the anpcscript, and the interpreter add the 
+	-- userdata_type argument
+	-- TODO: Handle better objects at reload?
+	if not userdata_type then userdata_type = "object" end
+	
 	if type(value) == "userdata" then
 		if userdata_type then
 			if userdata_type == "object" then
@@ -361,9 +366,6 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 			end
 		end
 	end
-
-	--minetest.log("This is the key: "..dump(key))
-	--minetest.log("This is the process ID: "..self.process.current.id)
 
 	if subkey and type(storage[key]) == "table" then
 		storage[key][subkey] = value
@@ -851,10 +853,10 @@ npc.proc.register_program = function(name, raw_instruction_list, source_location
 		local initial_instruction = 0
 		for i = 1, #raw_instruction_list do
 			-- The following instructions are only for internal use
-			assert(raw_instruction_list[i].name ~= "npc:jump",
-				"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:jump_if",
-				"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
+			--assert(raw_instruction_list[i].name ~= "npc:jump",
+				--"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
+			--assert(raw_instruction_list[i].name ~= "npc:jump_if",
+				--"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
 			assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
 				"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
 			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
@@ -1389,8 +1391,9 @@ _npc.env.node_find = function(self, args)
 	end
 
 	nodes_found = minetest.find_nodes_in_area(min_pos, max_pos, nodenames)
-	minetest.log("Found: "..dump(nodes))
+	minetest.log("Found: "..dump(nodes_found))
 	
+	if #nodes_found == 0 then return nil end
 	if (args.owned_only == nil and args.used_only == nil) then return nodes_found end
 	
 	-- Apply filters
