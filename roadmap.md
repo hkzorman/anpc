@@ -23,11 +23,12 @@ should be supported by the mod.
 	[x] Implement interpreter for anpc-acript
 		[x] Support variables and executing instructions
 		[x] Support control instructions
-	[ ] Add exit instruction
+	[x] Add exit instruction
 	[ ] Add debug tool
-	    [ ] See current program instructions
+	    [x] See current program instructions
+	    [ ] Ability to execute user-selected
 	    [ ] See instruction arguments
-	    [ ] 
+	    [ ] Be able to see the "program" and "data" data structures
 [-] Translate all built-in programs to anpc-script
 
 ### Version 1.0.0

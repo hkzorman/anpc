@@ -449,7 +449,9 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 
 	if instruction.name == "npc:if" then
 
+		-- TODO: Remove this as the interpreter now does this
 		-- Process true instructions if available
+		--[[
 		local true_instrs = {}
 		for i = 1, #instruction.args.true_instructions do
 			assert(not instruction.args.true_instructions[i].declare,
@@ -510,6 +512,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			end
 
 		end
+		]]--
 
 	elseif instruction.name == "npc:switch" then
 
@@ -546,6 +549,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 
 	elseif instruction.name == "npc:while" then
 
+		-- TODO: Remove this as the interpreter now does this
+		--[[
 		-- Support time-based while loop.
 		-- The loop will execute as many times as possible within the given time.
 		-- The given time is in seconds, no smaller resolution supported.
@@ -590,9 +595,12 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 		if instruction.args.time then
 			instruction_list[#instruction_list + 1] = {name = "npc:timer:instr:stop"}
 		end
+		]]--
 
 	elseif instruction.name == "npc:for" then
 
+		-- TODO: Remove this as the interpreter now does this
+		--[[
 		-- Initialize loop variable
 		instruction_list[#instruction_list + 1] = {
 			name = "npc:var:set",
@@ -642,6 +650,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			},
 			loop_end = true
 		}
+		]]--
 
 	-- TODO: Remove for each?
 	elseif instruction.name == "npc:for_each" then
@@ -730,6 +739,8 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 
 	elseif instruction.name == "npc:wait" then
 
+		-- TODO: Remove this as the interpreter now does this
+		--[[
 		-- This is not a busy wait, this modifies the interval in two instructions
 		local wait_time = _npc.dsl.evaluate_argument(self, instruction.args.time, nil, nil)
 		instruction_list[#instruction_list + 1] =
@@ -740,6 +751,7 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 			end}}
 		instruction_list[#instruction_list + 1] =
 			{name="npc:set_proc_interval", args={value = "@local._prev_proc_int"}}
+		]]--
 
 	elseif not instruction.name and instruction.declare then
 
@@ -802,10 +814,6 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 	else
 		-- Insert the instruction
 		instruction_list[#instruction_list + 1] = instruction
-	end
-
-	if instruction.name == "npc:for" then
-		minetest.log("instruction_list: "..dump(instruction_list))
 	end
 
 	return instruction_list, is_function
@@ -1101,19 +1109,8 @@ npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
 end)
 
 -----------------------------------------------------------------------------------
------------------------------------------------------------------------------------
--- Built-in instructions
------------------------------------------------------------------------------------
------------------------------------------------------------------------------------
-
------------------------------------------------------------------------------------
 -- Utilities instructions
 -----------------------------------------------------------------------------------
-npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
-	local obj = args.object
-	return obj:get_pos()
-end)
-
 npc.proc.register_instruction("npc:random", function(self, args)
 	if args.start and args["end"] then
 		return math.random(args.start, args["end"])
@@ -1752,7 +1749,10 @@ npc.proc.register_instruction("npc:model:set_animation", _npc.model.set_animatio
 -----------------------------------------------------------------------------------
 -- Object instructions
 -----------------------------------------------------------------------------------
-
+npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
+	local obj = args.object
+	return obj:get_pos()
+end)
 
 -----------------------------------------------------------------------------------
 -- Movement instructions
@@ -1880,10 +1880,11 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 
 	local dir = vector.direction(self_pos, trgt_pos)
 
+	-- TODO: The below is probably dealt with better in a program
 	-- WARNING: The below is currently halted.
 	-- 			It is possible this code will not be used anymore.
 	-- 
-	-- Obstacle avoidance: in order to use these instruction in a loop,
+	-- Obstacle avoidance: in order to use this instruction in a loop,
 	-- some obstacle avoidance features can be enabled via arguments. In
 	-- general, these are the possible obstacle avoidance:
 	--   1. The NPC will jump over any jumpable-obstacle
@@ -2119,7 +2120,6 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 end)
 
 
-
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 -- Process API
@@ -2263,6 +2263,7 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 	self.process.program_changed = true
 
 	-- TODO: Key is 100, but queue_head = 1. It happened.
+	-- This is probably fixed already by new queue logic
 	self.process.key = (self.process.key + 1) % 100
 end	
 
