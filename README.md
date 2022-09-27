@@ -4,7 +4,7 @@
 
 **NOTE** `anpc` is still on development. This is not even an alpha version - but close. The mod is very stable, but functionality is missing. This mod also doesn't contain any *real* playable content: you can fiddle around with the included `vegetarian.lua` NPC, which will be taken out of the release version of the mod.
 
-For more information about how to use `anpc`, please see (anpc_dev)[https://github.com/hkzorman/anpc-dev]
+For more information about how to use `anpc`, please see [anpc_dev](https://github.com/hkzorman/anpc-dev)
 
 ## How does it works?
 The main concept behind `anpc` is that each NPC is an independent, programmable computer. 
