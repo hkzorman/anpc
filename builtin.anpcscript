@@ -1,0 +1,49 @@
+-- Built-in programs for anpc
+-- (c) 2018-2022 by Zorman2000
+--
+-- These programs are a relatively basic implementation of commonly needed 
+-- NPC behavior. You are free to use them in your NPCs as they are,
+-- or to copy and enhance them for your own needs.
+
+-- Program to walk to a specific position, with pathfinding.
+-- If the position is a node, the program will automatically walk to
+-- a surrounding node.
+-- Supported args:
+-- * pos: the destination position. This is a normal minetest position
+-- * force_accessing_pos: used to always use an accessing position even if the
+--                        target pos is actually walkable
+define program npc:walk_to_pos
+	@local.has_reached_pos = false
+	@local.end_pos = npc:env:node:get_accessing_pos(pos = @args.pos, force = @args.force_accessing_node)
+	while (@local.has_reached_pos == false) do
+		@local.has_reached_pos = npc:move:walk_to_pos(target_pos = @local.end_pos, original_target_pos = @args.pos, check_end_pos_walkable = false)
+		if (@local.has_reached_pos == nil) then
+			break
+		end
+	end
+end
+
+-- This program should only be run as a "state" program. The reason is
+-- because following
+-- Stop conditions
+-- * NPC has reached the target
+-- * NPC has reached the target and 
+define program npc:follow
+	npc:set_proc_interval(value = 0.25)
+	@local.reach = @args.reach_distance
+	if (@args.reach_distance == nil) then
+		@local.reach = 1
+	end
+	
+	@local.target_pos = npc:obj:get_pos(object = @args.object)
+	if (@local.target_pos ~= nil) then
+		-- If NPC reached close to the player, then stop and face it
+		if (npc:distance_to(pos = @local.target_pos) < @local.reach) then
+			npc:move:stand()
+			npc:move:rotate(target_pos = @local.target_pos)
+		-- Else, NPC will continue 
+		else
+			npc:move:walk_to_pos(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false)
+		end
+	end
+end

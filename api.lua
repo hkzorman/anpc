@@ -102,6 +102,7 @@ end
 --	 - Time expression:
 --     - @time: Returns minetest local time * 24000
 _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
+	--minetest.log("Got expr: "..dump(expr))
 	if type(expr) == "string" then
 		if expr:sub(1,1) == "@" then
 			local expression_values = string.split(expr, ".")
@@ -115,12 +116,18 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 			local bracket_start = string.find(expr, "%[")
 			local bracket_end = string.find(expr, "%]")
 			if bracket_start ~= nil and bracket_end ~= nil then
-				second_arg = expr:sub(1, bracket_start - 1)
+				local point_start = string.find(expr, "%.")
+				second_arg = expr:sub(point_start + 1, bracket_start - 1)
 				orig_key = expr:sub(bracket_start + 1, bracket_end - 1)
 				if orig_key:sub(1,1) == "@" then
 					key = _npc.dsl.evaluate_argument(self, orig_key)
 				else
 					key = orig_key
+				end
+				
+				-- Check if the key is a number - if so, we should use a key of type number
+				if type(key) == "string" and string.find(key, "^%d+$") > -1 then
+					key = tonumber(key)
 				end
 			else
 				if expression_values[2] then
@@ -153,37 +160,6 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				result = self.data.global[second_arg]
 			elseif storage_type == "@temp" then
 				result = self.data.temp[second_arg]
-			--elseif storage_type == "@table" then
-				-- Supported operations:
-				-- @table.length.<table> - gets the length of an array
-				-- @table.get.<table>.<table index> - gets element of an array
-				-- @table.add.<table>.<element>.<position> 
-				-- @table.remove.<table>.<position>
-				-- @table.set.<table>.<element>.<position>
-				-- In the above, <table> can be any variable e.g. @local.something
-				--local value = _npc.dsl.evaluate_argument(self, expression_values[3].."."..expression_values[4])
-				--if expression_values[2] == "length" then
-				--	local count = 0
-				--	for _ in pairs(value) do count = count + 1 end
-				--	return count
-				--elseif expression_values[2] == "get" then
-				--	return value[expression_values[5]]
-				--elseif expression_values[2] == "add" then
-				--	if #expression_values == 6 then
-				--		return table.insert(value, expression_values[6], expression_values[5])
-				--	else
-				--		return table.insert(value, expression_values[5])
-				--	end
-				--elseif expression_values[2] == "remove" then
-				--	if #expression_values == 5 then
-				--		return table.remove(value, expression_values[5])
-				--	end
-				--	return table.remove(value)
-				--elseif expression_values[2] == "set" then
-				--	local result = value[expression_values[6]]
-				--	value[expression_values[6]] = expression_values[5]
-				--	return result
-				--end
 			elseif storage_type == "@env" then
 				result = self.data.env[second_arg]
 			elseif storage_type == "@objs" then
@@ -209,9 +185,6 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 						end
 					end
 				end
-			--elseif storage_type == "@random" then
-				--if expression_values[2] 
-			--	return math.random(expression_values[2], expression_values[3])
 			elseif storage_type == "@time" then
 				return 24000 * minetest.get_timeofday()
 			-- This might be temporary
@@ -230,15 +203,15 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 			-- Check if there's a third argument.
 			-- Supported third argument:
 			--   - `length`: if object is a table, returns length of table
-			--minetest.log("There is a third arg? "..dump(third_arg))
 			if third_arg then
 				if third_arg == "length" then
+					if not result then return -1 end
 					local count = 0
 					for _ in pairs(result) do count = count + 1 end
 					return count
 				end
 			end
-			
+
 			if key and type(result) == "table" then
 				return result[key]
 			else
@@ -268,8 +241,8 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 	local subkey = nil
 	local orig_subkey = key
 	
-	minetest.log("Got key: "..dump(key))
-	minetest.log("Got value: "..dump(value))
+	--minetest.log("Got key: "..dump(key))
+	--minetest.log("Got value: "..dump(value))
 	
 	if storage_type == nil and key and key:sub(1,1) == "@" then
 		local index = string.find(key, "%.")
@@ -280,7 +253,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 		storage_type = "local"
 	end
 	
-	minetest.log("Selected storage: "..dump(storage_type))
+	--minetest.log("Selected storage: "..dump(storage_type))
 	
 	-- TODO: This doesn't work, I think
 	-- Support assigning values to array elements
@@ -1075,8 +1048,18 @@ npc.proc.register_instruction("npc:execute", function(self, args)
     self.process.program_changed = true
 end)
 
-npc.proc.register_instruction("npc:set_state_process", function(self, args)
-	npc.proc.set_state_process(self, args.name, args.args)
+npc.proc.register_instruction("npc:set_default_program", function(self, args)
+	npc.proc.set_state_process(self, args.name, args.args, true)
+end)
+
+-- Exits the current program
+-- Arguments:
+-- * return_value: value returned when program exits. Defaults to nil
+npc.proc.register_instruction("npc:exit", function(self, args)
+	-- This implementation will cause a new program to be picked up on the
+	-- next entity step
+	self.process.current.instruction =
+		#program_table[self.process.current.name].instructions + 1
 end)
 
 -- Timer instructions
@@ -1138,9 +1121,9 @@ npc.proc.register_instruction("npc:random", function(self, args)
 end)
 
 npc.proc.register_instruction("npc:distance_to", function(self, args)
-	if args.x and args.y and args.z then
+	if args.pos then
 		local source = self.object:getpos()
-		local target = {x = args.x, y = args.y, z = args.z}
+		local target = args.pos
 		local result = vector.distance(source, target)
 		if args.round then return vector.round(result) else return result end
 	elseif args.object then
@@ -1789,6 +1772,15 @@ npc.proc.register_instruction("npc:move:rotate", function(self, args)
 	self.object:set_yaw(yaw)
 end)
 
+npc.proc.register_instruction("npc:move:get_pos", function(self, args)
+	local round = args.round
+	if args.round then
+		return vector.round(self.object:get_pos())
+	else
+		return self.object:get_pos()
+	end
+end)
+
 npc.proc.register_instruction("npc:move:to_pos", function(self, args)
 	self.object:move_to(args.pos, true)
 end)
@@ -1949,6 +1941,8 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	_npc.model.set_animation(self, {name = "walk", speed = 30})
 end)
 
+-- Walk instruction using pathfinding
+-- Supports position lag correction, climbing stairs/slabs, jumping and opening doors
 npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	minetest.log("Arguments: "..dump(args))
 	local result = false
@@ -2132,6 +2126,7 @@ end)
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
 npc.proc.execute_program = function(self, name, args)
+	assert(program_table[name] ~= nil, "Program with name '"..name.."' is not a registered program")
 	-- Enqueue process - this is a priority enqueue
 	local tail = self.process.queue_tail
 	local head = self.process.queue_head
@@ -2174,7 +2169,7 @@ end
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 	assert(instruction_table[name] ~= nil, "Unknown instruction: "..name)
 
-	minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
+	--minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
 
 	local processed_args = {}
 	if raw_args then
@@ -2192,8 +2187,8 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 
 	local result = instruction_table[name](self, processed_args)
 	if (result_key) then
-		minetest.log("Instruction returned: "..dump(result))
-		minetest.log("This is the result_key: "..dump(result_key))
+		--minetest.log("Instruction returned: "..dump(result))
+		--minetest.log("This is the result_key: "..dump(result_key))
 		_npc.dsl.set_var(self, result_key, result)
 	end
 
@@ -2302,17 +2297,16 @@ npc.do_step = function(self, dtime)
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
 
+	-- TODO: Replace with events (which are, scheduled interrupts)
 	-------------------------------------------------------------------------------
 	-- Schedule functionality
 	-- Builds a queue of schedules to be executed on a
 	-- Check all entries in the schedule. Execute all where:
 	--   earliest_start_time <= current_time <= latest_start_time
 	-------------------------------------------------------------------------------
-	--TODO: DO or not do?
-	-- A schedule can be done using a process.
-	-- Get current time
-	--local current_time = 24000 * minetest.get_timeofday()
-	--if (current_time <= 500)
+	-- TODO: DO or not do?
+	-- TODO: ANSWER: Scheduled interrupts are the way to go
+	--       e.g. npc:event:schedule(time = 22000, name = "program_name")
 
 
 	-------------------------------------------------------------------------------
@@ -2320,6 +2314,7 @@ npc.do_step = function(self, dtime)
 	-------------------------------------------------------------------------------
 	if (self.timers.proc_value > self.timers.proc_int) then
 		self.timers.proc_value = 0
+		local current = self.process.current
 
 		-- Increase instruction timer if available
 		if (self.timers.instr_timer) then
@@ -2390,48 +2385,61 @@ npc.do_step = function(self, dtime)
 
 		-------------------------------------------------------------------------------
 		-- Process queue
+		
 		-- Check if there is a current process
 		if self.process.current.name ~= nil then
 
-			-- Check if there is a next instruction
+			-- Step 1: Check if the program is done.
+			-- If the program is done, check if it is a state process.
+			-- If it is a state process, the process is restarted.
+			-- If not, the process is dequeued.
 			if self.process.current.instruction >
 				#program_table[self.process.current.name].instructions then
 				-- If process is state process, reset instruction counter
+				-- and re-run the process
 				if self.process.current.name == self.process.state.name then
 					self.process.current.instruction =
 						program_table[self.process.current.name].initial_instruction
 				else
-					-- No more instructions, deque process
+					-- No more instructions, dequeue process
 					local next_head = (self.process.queue_head + 1) % 100
 					if next_head == 0 then next_head = 1 end
 					self.process.queue[self.process.queue_head] = nil
 					self.process.current.name = nil
 					self.process.current.instruction = -1
 					self.process.queue_head = next_head
-					-- Clear memory of the dequed process
+					-- Clear memory of the dequeued process
 					self.data.proc[self.process.current.id] = nil
 				end
 				-- minetest.log("Condition: "..dump(self.process.queue_tail)..", "..dump(self.process.queue_head))
 				-- minetest.log("Condition: "..dump(self.process.queue))
 				-- minetest.log("Condition: "..dump(self.process.queue[self.process.queue_head]))
-				-- Check if no more processes in queue
-				if (self.process.queue_tail <= self.process.queue_head)
-					and (self.process.queue[self.process.queue_head] == nil) then
-					-- Execute state process, if present
-					if self.process.state.name ~= nil then
-						self.process.current.id = self.process.state.id
-						self.process.current.name = self.process.state.name
-						self.process.current.args = self.process.state.args
-						self.process.current.instruction =
-							program_table[self.process.current.name].initial_instruction
-						self.process.queue[self.process.queue_head] = self.process.current
-					end
-				else
-					-- Execute next process in queue
-					-- The deque should reduce the #self.process.queue
-					self.process.current = self.process.queue[self.process.queue_head]
-				end
+				
+				-- Step 2: Check if there is another process in queue.
+				-- If there is, execute that process.
+				-- If there's not, then execute the default state process
+				if self.process.queue[self.process.queue_head] == nil then
+					-- If there's a process at the end of tail, execute that one
+					if self.process.queue[self.process.queue_tail] ~= nil then
+						self.process.current = self.process.queue[self.process.queue_tail]
+						-- Reset head and tail
+						self.process.queue_head = 1
+						self.process.queue_tail = 1
+					-- Else, just execute state process
+					else
+						-- Execute state process, if present
+						if self.process.state.name ~= nil then
+							self.process.current.id = self.process.state.id
+							self.process.current.name = self.process.state.name
+							self.process.current.args = self.process.state.args
+							self.process.current.instruction =
+								program_table[self.process.current.name].initial_instruction
+							self.process.queue[self.process.queue_head] = self.process.current
+						end
+					end	
+				end 
 			end
+		-- If there's no current process, then try to find one to execute
 		else
 			-- Check if there is a process in queue
 			if (self.process.queue_tail > self.process.queue_head)
@@ -2461,7 +2469,7 @@ npc.do_step = function(self, dtime)
 				minetest.log("Process now: "..dump(self.process))
 				return
 			end
-			minetest.log("Current instruction: "..dump(instruction))
+			--minetest.log("Current instruction: "..dump(instruction))
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
             --minetest.log("Next 2")
             if self.process.program_changed == false then
@@ -2590,7 +2598,7 @@ npc.set_debug = function(self, is_debug)
 	if is_debug == false then
 		self.timers.proc_int = 0.5
 	else
-		self.timers.proc_int = 1
+		self.timers.proc_int = 1.5
 	end
 		
 	self.debug.show_debugger = is_debug
@@ -2647,6 +2655,7 @@ npc.proc.register_program("builtin:idle", {
 		}}}
 })
 
+--[[
 npc.proc.register_program("builtin:walk_to_pos", {
 	{name = "npc:var:set", args = {
 		key = "has_reached_pos",
@@ -2718,7 +2727,7 @@ npc.proc.register_program("builtin:follow", {
 			}}
 		}	
 	}
-}})
+]]--
 
 -----------------------------------------------------------------------------------
 -- Built-in high-latency tasks
