@@ -32,11 +32,12 @@ local group_to_pos_map = {}
 -- Check if `anpc-dev` mod is enabled. If so, make the program table and instruction
 -- table accessible from `npc.proc.*`. This enables debugging tools in `anpc_dev`
 local mods = minetest.get_modnames()
-local enable_debug = false
+local is_dev_mode = false
 for i = 1, #mods do
 	if mods[i] == "anpc_dev" then
 		npc.proc.program_table = program_table
 		npc.proc.instruction_table = instruction_table
+		is_dev_mode = true
 	end
 end
 
@@ -865,11 +866,13 @@ npc.proc.register_program = function(name, raw_instruction_list, source_location
 			instructions = instruction_list
 		}
 		
-		if enable_debug then
+		minetest.log("Source location: "..dump(source_location))
+		
+		if source_location then
 			program_table[name]["source_file"] = source_location
 		end
 
-		minetest.log("Registered and compiled program '"..dump(name).."' with initial instruction: "..dump(initial_instruction)..":")
+		minetest.log("Registered program "..dump(name).." with initial instruction: "..dump(initial_instruction)..":")
 
 		--minetest.log(dump(program_table[name]))
 		return true
@@ -2169,8 +2172,10 @@ end
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 	assert(instruction_table[name] ~= nil, "Unknown instruction: "..name)
 
+	-- Un-comment to debug instructions that are crashing
 	--minetest.log("["..dump(self.process.current.name).."]: ["..dump(self.process.current.instruction).."] "..dump(name))
-
+	--minetest.log("[Raw arguments]: "..dump(raw_args))
+	
 	local processed_args = {}
 	if raw_args then
 		for arg_key,arg_value in pairs(raw_args) do
@@ -2208,6 +2213,22 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 
 		local instruction = program_table[self.process.current.name].instructions[self.process.current.instruction]
 		if instruction then
+			-- Break at this point if breakpoint is found
+			if instruction.pause == true and not instruction.override and is_dev_mode == true then
+				self.debug.pause = true
+				
+				-- Update debug screen if being shown
+				if self.debug and self.debug.show_debugger == true then
+					npc_dev.show_debug_formspec(npc_dev.source, self.object)
+				end
+				return
+			end
+			
+			-- Remove breakpoint override so that next time it hits the breakpoint again
+			if instruction.override == true then
+				instruction.override = false
+			end
+
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
         end
 
@@ -2470,6 +2491,25 @@ npc.do_step = function(self, dtime)
 				minetest.log("Process now: "..dump(self.process))
 				return
 			end
+			
+			-- Only perform this check if in dev mode
+			-- Break at this point if "pause" is found
+			if is_dev_mode == true then
+				if instruction.pause == true and not instruction.override and is_dev_mode == true then
+					self.debug.pause = true
+					-- Update debug screen if being shown
+					if self.debug and self.debug.show_debugger == true then
+						npc_dev.show_debug_formspec(npc_dev.source, self.object)
+					end
+					return
+				end
+			end
+			
+			-- Remove breakpoint override so that next time it hits the breakpoint again
+			if instruction.override == true then
+				instruction.override = false
+			end
+			
 			--minetest.log("Current instruction: "..dump(instruction))
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
             --minetest.log("Next 2")

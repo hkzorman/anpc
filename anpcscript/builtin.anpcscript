@@ -28,6 +28,9 @@ end
 -- Stop conditions
 -- * NPC has reached the target
 -- * NPC has reached the target and 
+-- Arguments:
+-- * object: the object to follow. Should be a userdata
+-- * reach_distance: (optional, default = 1)
 define program npc:follow
 	npc:set_proc_interval(value = 0.25)
 	@local.reach = @args.reach_distance

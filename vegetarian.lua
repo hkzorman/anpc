@@ -78,12 +78,7 @@ end)
 -- Generated programs
 npc.proc.register_program("vegetarian:init", {
 	{name = "npc:var:set", args = {key = "hunger", value = 0, storage_type = "global"}}
-})
-
-npc.proc.register_program("vegetarian:get_hungry", {
-		{name = "npc:var:set", args = {key = "hunger", value = {left = "@global.hunger", op = "+", right = 2}, storage_type = "global"}},
-	{name = "npc:jump_if", args = {expr = {left = true, op = "==", right = true}, negate = false, offset = true, pos = -2}}, -- WHILE end [2]
-})
+}, "/home/hfranqui/minetest/mods/anpc_dev/vegetarian.anpcscript")
 
 npc.proc.register_program("vegetarian:idle", {
 	{name = "npc:move:stand", args = {}},
@@ -115,7 +110,7 @@ npc.proc.register_program("vegetarian:idle", {
 				{name = "npc:execute", args = {name = "vegetarian:wander"}},
 	{name = "npc:var:set", args = {key = "for_index", value = {left = "@local.for_index", op = "+", right = 1}, storage_type = "local"}},
 	{name = "npc:jump_if", args = {expr = {left = "@local.for_index", op = "<=", right = "@objs.all.length"}, negate = false, offset = true, pos = -21}}, -- FOR end [29]
-})
+}, "/home/hfranqui/minetest/mods/anpc_dev/vegetarian.anpcscript")
 
 npc.proc.register_program("vegetarian:wander", {
 	{name = "npc:var:set", args = {key = "prev_dir", value = -1, storage_type = "local"}},
@@ -129,7 +124,7 @@ npc.proc.register_program("vegetarian:wander", {
 	{name = "npc:var:set", args = {key = "for_index", value = {left = "@local.for_index", op = "+", right = 1}, storage_type = "local"}},
 	{name = "npc:jump_if", args = {expr = {left = "@local.for_index", op = "<", right = "@local._inline0"}, negate = false, offset = true, pos = -7}}, -- FOR end [10],
 	{name = "npc:move:stand", args = {}}
-})
+}, "/home/hfranqui/minetest/mods/anpc_dev/vegetarian.anpcscript")
 
 npc.proc.register_program("vegetarian:sleep", {
 	{key = "@local.bed_pos", name = "npc:env:node:find", args = {matches = "single", radius = 35, nodenames = {"beds:bed_bottom"}, nodenames = {"beds:bed_bottom"}}},
@@ -141,7 +136,7 @@ npc.proc.register_program("vegetarian:sleep", {
 			{name = "npc:set_proc_interval", args = {value = "@local._prev_proc_int"}},
 		{name = "npc:jump_if", args = {expr = {left = {left = {left = "@time", op = ">", right = 20000}, op = "&&", right = {left = "@time", op = "<", right = 24000}}, op = "||", right = {left = "@time", op = "<", right = 6000}}, negate = false, offset = true, pos = -4}}, -- WHILE end [6],
 		{name = "npc:var:set", args = {key = "hunger", value = 60, storage_type = "global"}}
-})
+}, "/home/hfranqui/minetest/mods/anpc_dev/vegetarian.anpcscript")
 
 npc.proc.register_program("vegetarian:feed", {
 		{name = "npc:jump_if", args = {expr = {left = {left = {left = "@time", op = ">", right = 20000}, op = "&&", right = {left = "@time", op = "<=", right = 24000}}, op = "||", right = {left = "@time", op = "<", right = 6000}}, offset = true, negate = true, pos = 1}}, -- IF [1],
@@ -156,8 +151,7 @@ npc.proc.register_program("vegetarian:feed", {
 		{name = "npc:jump", args = {offset = true, pos = 1}}, -- ELSE [10],
 			{name = "npc:execute", args = {name = "vegetarian:wander"}},
 	{name = "npc:jump_if", args = {expr = {left = "@global.hunger", op = ">=", right = 0}, negate = false, offset = true, pos = -12}}, -- WHILE end [12]
-})
-
+}, "/home/hfranqui/minetest/mods/anpc_dev/vegetarian.anpcscript")
 
 
 -- Wandering program
