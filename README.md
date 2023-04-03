@@ -50,6 +50,18 @@ And you may be asking again, why? Why build NPCs like a CPU? The idea of a progr
 ## How to use `anpc`
 If you are user and don't want to create any NPC and just play Minetest, you should use a mod that uses `anpc` to implement its mobs. Currently there are no mods that do that, but I will be developing one soon.
 
+### Testing
+If you are really eager to test this out, the included `vegetarian.lua` is a testing grounds NPC. A couple of testing items are included that can let you play around with some features of `anpc`.
+* `Vegetarian Spawner`: use this to spawn the dull and boring vegetarian NPC. By himself, he will:
+  * Wander around and sometimes look at you or other objects around him
+  * When he gets hungry, he will find grass and eat it, until he's satisfied
+  * When it is night, he will try to find a bed and sleep on it
+* `Follower`: while having this in hand, punch a NPC with it. It will follow you wherever you go, until you punch him again.
+* `Feeder`: punch a NPC while having this in hand and he will go around searching for grass, even if he's not hungry.
+* `Jumper`: punch a NPC while having this in hand to make him jump
+* `Owner`: while having this in hand, punch a node. Then, punch a NPC. You will be giving him "ownership" of that node, e.g. their bed. When they go to sleep, they will search first for their "owned" bed.
+* `Walk-to-owned`: punch a NPC while having this in hand and he will walk to one of his "owned" nodes. Notice that you must first use the `Owner` item to give him an owned node.
+
 
 ## OK, I actually want to create a NPC. What should I do?
 Go to `anpc`'s helper mod, `anpc-dev`, in order to get started to create NPCs. `anpc-dev` contains development tools and documentation to help you get started and create NPCs with `anpc`.

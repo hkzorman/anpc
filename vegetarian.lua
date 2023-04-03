@@ -58,22 +58,22 @@ npc.proc.register_instruction("vegetarian:get_hunger", function(self, args)
     return self.data.global.hunger
 end)
 
-npc.proc.register_instruction("vegetarian:check_can_ack_nearby_objs", function(self, args)
-	-- Random 50% chance
-	local chance = math.random(1, 100)
-	if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
-		return false
-	end
+-- npc.proc.register_instruction("vegetarian:check_can_ack_nearby_objs", function(self, args)
+-- 	-- Random 50% chance
+-- 	local chance = math.random(1, 100)
+-- 	if chance < (100 - npc.eval(self, "@args.ack_nearby_objs_chance")) then
+-- 		return false
+-- 	end
 
-	local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
-	if object then
-		local object_pos = object:get_pos()
-		local self_pos = self.object:get_pos()
-		return vector.distance(object_pos, self_pos) < npc.eval(self, "@args.ack_nearby_objs_dist")
-			and vector.distance(object_pos, self_pos) > 0
-	end
-	return false
-end)
+-- 	local object = self.data.env.objects[self.data.proc[self.process.current.id].for_index]
+-- 	if object then
+-- 		local object_pos = object:get_pos()
+-- 		local self_pos = self.object:get_pos()
+-- 		return vector.distance(object_pos, self_pos) < npc.eval(self, "@args.ack_nearby_objs_dist")
+-- 			and vector.distance(object_pos, self_pos) > 0
+-- 	end
+-- 	return false
+-- end)
 
 -- Generated programs
 npc.proc.register_program("vegetarian:init", {
@@ -237,36 +237,9 @@ minetest.register_entity("anpc:vegetarian_npc", {
 	visual_size = {x = 1, y = 1, z = 1},
 	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
 	stepheight = 0.6,
-	--collisionbox = {-0.6,-0.6,-0.6, 0.6,0.6,0.6},
 	physical = true,
 	on_activate = npc.on_activate,
-	get_staticdata = function(self)
-
-		local result = ""
-		if self.npc_id then
-			result = result..self.npc_id.."|"
-		end
-
-		if self.timers then
-			result = result..minetest.serialize(self.timers).."|"
-		end
-
-		if self.process then
-			result = result..minetest.serialize(self.process).."|"
-		end
-
-		if self.data then
-			self.data.env.objects = {}
-			self.data.temp = {}
-			--minetest.log("User data: "..dump(self.data))
-			result = result..minetest.serialize(self.data).."|"
-		end
-
-        minetest.log("Self: "..dump(self))
-
-		return result
-
-	end,
+	get_staticdata = npc.get_staticdata,
 	on_step = npc.do_step,
 	on_rightclick = function(self, puncher)
 		minetest.log(dump(self))
@@ -397,7 +370,7 @@ npc.proc.register_program("vegetarian:walk_to_owned", {
 
 -- Owner item
 minetest.register_craftitem("anpc:vegetarian_owner", {
-	description = "Owner\n(Gives the NPC ownership of the last clicked node)",
+	description = "Owner\nGives the NPC ownership of the last clicked node",
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		if pointed_thing.type == "object" then
@@ -405,7 +378,8 @@ minetest.register_craftitem("anpc:vegetarian_owner", {
 			local pos = minetest.deserialize(meta:get_string("target_pos"))
 			npc.proc.execute_program(pointed_thing.ref:get_luaentity(), "vegetarian:own", {
 				value = true,
-				pos = pos, 
+				pos = pos,
+				-- Please notice that categories are arbitrary
 				categories = {"sign"}
 			})
 			minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data))
@@ -419,7 +393,7 @@ minetest.register_craftitem("anpc:vegetarian_owner", {
 })
 
 minetest.register_craftitem("anpc:vegetarian_walk_to_owned", {
-	description = "Walk-to-owned\n(Walk to an owned node)",
+	description = "Walk-to-owned\nWalk to an owned node",
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		if pointed_thing.type == "object" then
@@ -439,7 +413,7 @@ minetest.register_craftitem("anpc:vegetarian_follower", {
 			--local user_meta = user:get_meta()
 			--local pos = minetest.deserialize(meta:get_string("target_pos"))
 			--minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data.env.nodes))
-			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "builtin:follow", {object = user}, true)
+			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "npc:follow", {object = user}, true)
 		end
 	end
 })

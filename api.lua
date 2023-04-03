@@ -1206,8 +1206,8 @@ _npc.env.node_get_accessing_pos = function(self, args)
 	-- Check vertical reach - NPCs should be able to walk to nodes even if
 	-- they are not in the floor, as long as they are within their vertical reach.
 	-- For the moment, the reach is defined as ceil(height) + ceil(height) / 2
-	-- Why? Well, a normal character.b3d model is almost 2 nodes height, and
-	-- with the arms it could theoritically reach the node above him/her/it.
+	-- TODO: Seems like a relatively good assumption - except if the model
+	--       has extra-long arms. We probably want to see how can we handle this.
 	-- First, calculate NPC height
 	local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
 	local vertical_reach = height + (height / 2)
@@ -1225,7 +1225,8 @@ _npc.env.node_get_accessing_pos = function(self, args)
 		if npc.pathfinder.is_good_node(target_node, {})
 			== npc.pathfinder.node_types.non_walkable or args.force == true then
 
-			-- First of all, try to see if the position in front of the node is walkable
+			-- First of all, if walking towards a node, try to see if the position
+			-- in front of the node is walkable
 			if (target_node.name
 				and minetest.registered_nodes[target_node.name].paramtype2 == "facedir") then
 
@@ -1237,6 +1238,10 @@ _npc.env.node_get_accessing_pos = function(self, args)
 						 return front_pos
 					end
 				end
+			-- If the position is not a node, then prefer accessible position
+			-- that is on the same direction that the NPC is walking to
+			else
+			
 			end
 
 			-- Search all surrounding nodes
@@ -1754,7 +1759,11 @@ npc.proc.register_instruction("npc:model:set_animation", _npc.model.set_animatio
 -----------------------------------------------------------------------------------
 npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
 	local obj = args.object
-	return obj:get_pos()
+	if obj and type(obj) == "userdata" then 
+		if args.round then return vector.round(obj:get_pos()) else return obj:get_pos() end
+	else
+		return nil
+	end
 end)
 
 -----------------------------------------------------------------------------------
@@ -2036,6 +2045,9 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		return true
 	end
 
+	-- For the purposes of the pathfinder - we assume stepheight = 1.
+	-- TODO: make this configurable. What if we want more than just 1 because
+	-- we have a bigger-than-two-nodes NPC?
 	self.object:set_properties({stepheight = 1})
 	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
 	self.object:set_properties({stepheight = 0.6})
@@ -2619,7 +2631,6 @@ npc.get_staticdata = function(self)
 	if self.data then
 		self.data.env.objects = {}
 		self.data.temp = {}
-		--minetest.log("User data: "..dump(self.data))
 		result = result..minetest.serialize(self.data).."|"
 	end
 	

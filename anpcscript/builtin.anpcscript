@@ -1,16 +1,16 @@
 -- Built-in programs for anpc
--- (c) 2018-2022 by Zorman2000
+-- (c) 2018-2023 by Zorman2000
 --
 -- These programs are a relatively basic implementation of commonly needed 
 -- NPC behavior. You are free to use them in your NPCs as they are,
 -- or to copy and enhance them for your own needs.
 
 -- Program to walk to a specific position, with pathfinding.
--- If the position is a node, the program will automatically walk to
--- a surrounding node.
+-- If the position is a solid node, the program will default to walk to
+-- a walkable surrounding node.
 -- Supported args:
 -- * pos: the destination position. This is a normal minetest position
--- * force_accessing_pos: used to always use an accessing position even if the
+-- * force_accessing_pos: boolean. Used to always use an accessing position even if the
 --                        target pos is actually walkable
 define program npc:walk_to_pos
 	@local.has_reached_pos = false
@@ -30,15 +30,15 @@ end
 -- * NPC has reached the target and 
 -- Arguments:
 -- * object: the object to follow. Should be a userdata
--- * reach_distance: (optional, default = 1)
+-- * reach_distance: (optional, default = 2)
 define program npc:follow
 	npc:set_proc_interval(value = 0.25)
 	@local.reach = @args.reach_distance
 	if (@args.reach_distance == nil) then
-		@local.reach = 1
+		@local.reach = 2
 	end
 	
-	@local.target_pos = npc:obj:get_pos(object = @args.object)
+	@local.target_pos = npc:obj:get_pos(object = @args.object, round = true)
 	if (@local.target_pos ~= nil) then
 		-- If NPC reached close to the player, then stop and face it
 		if (npc:distance_to(pos = @local.target_pos) < @local.reach) then
