@@ -1134,6 +1134,29 @@ npc.proc.register_instruction("npc:distance_to", function(self, args)
 	end
 end)
 
+-- Arguments:
+--   - x: must be a vector
+--   - y: can be a vector or number. If vector, operation is applied component by component.
+--        If number, then same number is added to all vector components
+npc.proc.register_instruction("npc:vector:add", function(self, args)
+	local x = args.x
+	local y = args.y
+	if type(y) == "object" then
+	end
+end)
+
+npc.proc.register_instruction("npc:vector:subtract", function(self, args)
+
+end)
+
+npc.proc.register_instruction("npc:vector:add", function(self, args)
+
+end)
+
+npc.proc.register_instruction("npc:vector:add", function(self, args)
+
+end)
+
 -----------------------------------------------------------------------------------
 -- Environment-related instructions
 -----------------------------------------------------------------------------------
@@ -1765,6 +1788,26 @@ npc.proc.register_instruction("npc:obj:get_pos", function(self, args)
 		return nil
 	end
 end)
+
+npc.proc.register_instruction("npc:obj:get_yaw", function(self, args)
+	local obj = args.object
+	if obj and type(obj) == "userdata" then
+		return obj:get_yaw()
+	else
+		return nil
+	end
+end)
+
+npc.proc.register_instruction("npc:obj:get_dir", function(self, args)
+	local obj = args.object
+	if obj and type(obj) == "userdata" then
+		return minetest.yaw_to_dir(obj:get_yaw())
+	else
+		return nil
+	end
+end)
+
+-- TODO: Add get_velocity, get_acceleration
 
 -----------------------------------------------------------------------------------
 -- Movement instructions
