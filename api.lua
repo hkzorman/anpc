@@ -2060,9 +2060,11 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 		return nil
 	end
 
+	minetest.log("Path: "..dump(path))
+
 	-- Move towards position
 	local next_node = path[1]
-	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z then
+	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z and #path > 1 then
 		next_node = path[2]
 	end
 

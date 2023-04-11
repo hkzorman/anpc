@@ -421,10 +421,17 @@ minetest.register_craftitem("anpc:vegetarian_follower", {
 	inventory_image = "default_apple.png",
 	on_use = function(itemstack, user, pointed_thing)
 		if pointed_thing.type == "object" then
-			--local user_meta = user:get_meta()
-			--local pos = minetest.deserialize(meta:get_string("target_pos"))
-			--minetest.log("self.data.env.nodes: "..dump(pointed_thing.ref:get_luaentity().data.env.nodes))
-			npc.proc.set_state_process(pointed_thing.ref:get_luaentity(), "npc:follow", {object = user}, true)
+			local entity = pointed_thing.ref:get_luaentity()
+			-- Toggle between follow and idle
+			if entity.process.state.name == "npc:follow" then
+				npc.proc.set_state_process(entity, "vegetarian:idle", {
+					ack_nearby_objs = true,
+					ack_nearby_objs_dist = 4,
+					ack_nearby_objs_chance = 50
+				}, true)
+			else
+				npc.proc.set_state_process(entity, "npc:follow", {object = user}, true)
+			end
 		end
 	end
 })

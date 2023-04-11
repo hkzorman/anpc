@@ -16,6 +16,8 @@ should be supported by the mod.
 - [ ] Movement
 	- [x] Walk to a specified position with pathfinding
 	- [ ] Follow a player or other entity
+		- [ ] Walk to an accessible node that is in the walking path
+		- [ ] Fix crash when userdata is stored in the program arguments
 	- [ ] Run-away from a player or other entity
 	- [ ] Attack a player or another entity
 	- [ ] Wander while avoiding cliffs, water, lava, etc.
@@ -27,12 +29,13 @@ should be supported by the mod.
 	- [ ] Add debug tool
 	    - [x] See current program instructions
 	    - [ ] Ability to execute user-selected
-	    - [ ] See instruction arguments
-	    - [ ] Be able to see the "program" and "data" data structures
+	    - [x] See instruction arguments
+	    - [x] Be able to see the "program" and "data" data structures
 - [ ] Translate all built-in programs to anpc-script
 
 ### Version 1.0.0
-
+- [ ] Programming API
+	- [ ] Support optional arguments with default values for instructions and programs
 - [ ] Movement
 	- [ ] Support precision jumping
 - [ ] Programming API
