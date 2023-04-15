@@ -165,9 +165,8 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				result = self.data.env[second_arg]
 			elseif storage_type == "@objs" then
 				result = self.data.env.objects
-				-- Supports passing in an index, a tracking ID or "all"
-				-- NOTE: Tracking ID will only work with objects the NPC
-				-- is nearby
+				-- Supports passing in an index, a tracking ID, a tracking record, or "all"
+				-- NOTE: This will only work if the NPC is within range of the object
 				
 				if second_arg == "all" then
 					result = self.data.env.objects
@@ -176,12 +175,24 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 					if type(key) == "number" then
 						return self.data.env.objects[key]
 					else
+						local obj_key = _npc.dsl.evaluate_argument(self, key)
+						-- Extract the tracking ID from the tracking record if
+						-- the expression is a variable containing a tracking record
+						if type(obj_key) == "table" and obj_key._is_tracking_record == true then
+							obj_key = obj_key._id
+						end
+
 						for i = 1, #self.data.env.objects do
-							if self.data.env.objects[i]
-								and self.data.env.objects[i]:get_luaentity()
-								and self.data.env.objects[i]:get_luaentity().anpc_track_id
-								and self.data.env.objects[i]:get_luaentity().anpc_track_id == key then
-								return self.data.env.objects[i]
+							local obj = self.data.env.objects[i]
+							if obj then
+								if obj:is_player() and obj:get_player_name() == obj_key then
+									return obj
+								else
+									local entity = obj:get_luaentity()
+									if entity and entity.anpc_track_id == obj_key then
+										return obj
+									end
+								end
 							end
 						end
 					end
@@ -294,44 +305,17 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 	if type(value) == "userdata" then
 		if userdata_type then
 			if userdata_type == "object" then
-				local obj = value
-				if obj then
-					-- Check if player
-					if obj:is_player() then
-						-- Store tracking record
-						storage[key] = {
-							userdata_type = "object",
-							obj_type = "player",
-							obj_attr = obj:get_player_name()
-						}
-					elseif obj:get_luaentity() then
-						-- Generate a tracking ID for entities
-						local id = "anpc:track:id:"..tostring(math.random(1000, 9999))
-						if obj:get_luaentity().anpc_track_id then
-							id = obj:get_luaentity().anpc_track_id
-						end
+				local tracking_record = _npc.dsl.generate_tracking_record(self, value)
 
-						obj:get_luaentity().anpc_track_id = id
-						-- Store tracking record
-						local tracking_record = {
-							userdata_type = "object",
-							obj_type = "object",
-							obj_attr = {
-								id = id,
-								distance = vector.distance(self.object:get_pos(), obj:get_pos()) * 3
-							}
-						}
-						
-						if subkey and type(storage[key]) == "table" then
-							storage[key][subkey] = tracking_record
-						else
-							storage[key] = tracking_record
-						end
-
-						-- Store actual object so that lookups are simpler
-						self.data.temp[id] = obj
-					end
+				if subkey and type(storage[key]) == "table" then
+					storage[key][subkey] = tracking_record
+				else
+					storage[key] = tracking_record
 				end
+	
+				-- Store actual object so that lookups are simpler
+				self.data.temp[tracking_record._id] = value
+
 				return
 			else
 				-- TODO: Handle other userdata types
@@ -390,6 +374,41 @@ _npc.dsl.get_var = function(self, key)
 	return result
 end
 
+_npc.dsl.generate_tracking_record = function(self, obj)
+	--local obj = value
+	if obj then
+		-- Check if player
+		if obj:is_player() then
+			-- Store tracking record
+			return {
+				_is_tracking_record = true,
+				_id = obj:get_player_name(),
+				userdata_type = "object",
+				obj_type = "player",
+				obj_attr = obj:get_player_name()
+			}
+		elseif obj:get_luaentity() then
+			-- Generate a tracking ID for entities
+			local id = "anpc:track:id:"..tostring(math.random(1000, 9999))
+			if obj:get_luaentity().anpc_track_id then
+				id = obj:get_luaentity().anpc_track_id
+			end
+
+			obj:get_luaentity().anpc_track_id = id
+			-- Store tracking record
+			return {
+				_is_tracking_record = true,
+				_id = id,
+				userdata_type = "object",
+				obj_type = "object",
+				obj_attr = {
+					id = id,
+					distance = vector.distance(self.object:get_pos(), obj:get_pos()) * 3
+				}
+			}
+		end
+	end
+end
 -----------------------------------------------------------------------------------
 -- Scheduling functions
 -----------------------------------------------------------------------------------
@@ -1218,10 +1237,15 @@ _npc.env.node_can_stand_in = function(self, args)
 end
 
 -- Returns a position from where a NPC can approach or access another position.
+-- Search methods:
+--  - prefer_first
+--  - prefer_closest
 _npc.env.node_get_accessing_pos = function(self, args)
 	minetest.log("Args: "..dump(args))
 	minetest.log("The chosen node: "..minetest.pos_to_string(args.pos))
 	minetest.log("Force an accessing node? "..dump(args.force))
+	local search_method = args.search_method or "prefer_first"
+	minetest.log("Search method: "..dump(search_method))
 
 	-- Make a copy of the given pos
 	local pos = {x=args.pos.x, y=args.pos.y, z=args.pos.z}
@@ -1231,7 +1255,7 @@ _npc.env.node_get_accessing_pos = function(self, args)
 	-- For the moment, the reach is defined as ceil(height) + ceil(height) / 2
 	-- TODO: Seems like a relatively good assumption - except if the model
 	--       has extra-long arms. We probably want to see how can we handle this.
-	-- First, calculate NPC height
+	-- First, calculate NPC's collisionbox height
 	local height = math.ceil(self.collisionbox[5] - self.collisionbox[2])
 	local vertical_reach = height + (height / 2)
 	-- Then check if the node is within the reach
@@ -1263,11 +1287,11 @@ _npc.env.node_get_accessing_pos = function(self, args)
 				end
 			-- If the position is not a node, then prefer accessible position
 			-- that is on the same direction that the NPC is walking to
-			else
-			
 			end
 
 			-- Search all surrounding nodes
+			local min_distance = 10000 -- Just a big number
+			local closest_pos = nil
 			local count = 0
 			while count < 4 do
 				-- Create copy of pos
@@ -1286,12 +1310,24 @@ _npc.env.node_get_accessing_pos = function(self, args)
 					cpos.z = cpos.z -1
 				end
 
-				local node = minetest.get_node(cpos)
-				if node and node.name and minetest.registered_nodes[node.name].walkable == false then
-					minetest.log("Returning this accessing pos: "..minetest.pos_to_string(cpos))
-					return cpos
+				local dist = vector.distance(self_pos, cpos)
+				if (dist < min_distance) then
+					min_distance = dist
+					closest_pos = cpos
+				end
+
+				if search_method == "prefer_first" then
+					local node = minetest.get_node(cpos)
+					if node and node.name and minetest.registered_nodes[node.name].walkable == false then
+						minetest.log("Returning this accessing pos: "..minetest.pos_to_string(cpos))
+						return cpos
+					end
 				end
 				count = count + 1
+			end
+
+			if search_method == "prefer_closest" then
+				return closest_pos
 			end
 		else
 			return pos
@@ -1807,7 +1843,16 @@ npc.proc.register_instruction("npc:obj:get_dir", function(self, args)
 	end
 end)
 
--- TODO: Add get_velocity, get_acceleration
+npc.proc.register_instruction("npc:obj:get_velocity", function(self, args)
+	local obj = args.object
+	if obj and type(obj) == "userdata" then
+		if args.round then return vector.round(obj:get_velocity()) else return obj:get_velocity() end
+	else
+		return nil
+	end
+end)
+
+-- TODO: get_acceleration
 
 -----------------------------------------------------------------------------------
 -- Movement instructions
@@ -2198,6 +2243,15 @@ npc.proc.execute_program = function(self, name, args)
 		self.process.queue[i] = self.process.queue[i - 1]
 	end
 
+	-- Pre-process program arguments - userdata arguments cause crashes!
+	if args then
+		for key, value in pairs(args) do
+			if type(value) == "userdata" then
+				args[key] = _npc.dsl.generate_tracking_record(self, value)
+			end
+		end
+	end
+
 	self.process.queue_tail = self.process.queue_tail + 1
 	self.process.queue[self.process.queue_head] = {
 		id = self.process.key,
@@ -2330,12 +2384,24 @@ end
 npc.proc.set_state_process = function(self, name, args, clear_queue)
 	self.process.state.id = self.process.key
 	self.process.state.name = name
+
+	-- Pre-process program arguments - userdata arguments cause crashes!
+	if args then
+		for key, value in pairs(args) do
+			if type(value) == "userdata" then
+				args[key] = _npc.dsl.generate_tracking_record(self, value)
+			end
+		end
+	end
+
 	self.process.state.args = args
 
 	if (clear_queue == true) then
 		self.process.queue_head = 1
 		self.process.queue_tail = 1
 		self.process.queue = {}
+		-- Clear current process, that way, state process should be picked
+		self.process.current = {}
 	end
 	
 	self.process.program_changed = true

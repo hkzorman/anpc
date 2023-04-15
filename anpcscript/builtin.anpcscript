@@ -14,7 +14,7 @@
 --                        target pos is actually walkable
 define program npc:walk_to_pos
 	@local.has_reached_pos = false
-	@local.end_pos = npc:env:node:get_accessing_pos(pos = @args.pos, force = @args.force_accessing_node)
+	@local.end_pos = npc:env:node:get_accessing_pos(pos = @args.pos, force = @args.force_accessing_node, search_method = @args.access_node_search_method))
 	while (@local.has_reached_pos == false) do
 		@local.has_reached_pos = npc:move:walk_to_pos(target_pos = @local.end_pos, original_target_pos = @args.pos, check_end_pos_walkable = false)
 		if (@local.has_reached_pos == nil) then
@@ -38,7 +38,7 @@ define program npc:follow
 		@local.reach = 2
 	end
 	
-	@local.target_pos = npc:obj:get_pos(object = @args.object, round = true)
+	@local.target_pos = npc:obj:get_pos(object = @objs.get[@args.object], round = true)
 	if (@local.target_pos ~= nil) then
 		-- If NPC reached close to the player, then stop and face it
 		if (npc:distance_to(pos = @local.target_pos) < @local.reach) then
@@ -46,7 +46,7 @@ define program npc:follow
 			npc:move:rotate(target_pos = @local.target_pos)
 		-- Else, NPC will continue 
 		else
-			npc:move:walk_to_pos(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false)
+			npc:move:walk_to_pos(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false, access_node_search_method = "prefer_closest")
 		end
 	end
 end
