@@ -900,6 +900,7 @@ end
 
 npc.proc.register_instruction = function(name, instruction)
 	if instruction_table[name] ~= nil then
+		assert("Instruction \""..name.."\" already exists.")
 		return false
 	else
 		instruction_table[name] = instruction
@@ -907,8 +908,9 @@ npc.proc.register_instruction = function(name, instruction)
 	end
 end
 
-npc.proc.register_high_latency_task = function(name, handler, timeout_handler)
+npc.proc.register_low_latency_task = function(name, handler, timeout_handler)
 	if hl_task_table[name] ~= nil then
+		assert("Low-latency \""..name.."\" already exists.")
 		return false
 	else
 		hl_task_table[name] = {
@@ -1933,6 +1935,53 @@ _npc.move.jump = function(self, args)
 
 end
 
+_npc.move.walk_to_pos_ll = function(self, args)
+
+	local trgt_pos = args.target_pos
+	--local yaw = args.yaw
+	--local cardinal_dir = args.cardinal_dir
+	local range = args.range or 1 -- horizontal distance the NPC will move on jump
+	local speed = args.speed or 1
+
+	local self_pos = vector.round(self.object:get_pos())
+	local dir = vector.direction(self_pos, trgt_pos)
+
+	-- Checks nodes in front to
+	local next_pos_front = {x = self_pos.x + dir.x, y = self_pos.y, z = self_pos.z + dir.y}
+	local next_pos_below = {x = self_pos.x + dir.x, y = self_pos.y - 1, z = self_pos.z + dir.z}
+	local next_y_diff = 0
+
+	local next_nod = minetest.get_node(next_pos_front)
+	if (next_nod.name ~= "air" and minetest.registered_nodes[next_nod.name].walkable == true) then
+		next_y_diff = 1
+		range = 2
+	else
+		next_nod = minetest.get_node(next_pos_below)
+		if (next_nod.name == "air") then
+			range = 0.5
+			next_y_diff = -1
+		end
+	end
+
+	local mid_point = (self.collisionbox[5] - self.collisionbox[2]) / 2
+
+	-- Based on range, doesn't takes time into account
+	local y_speed = math.sqrt ( (10 * range) / (math.sin(2 * (math.pi / 3))) ) + mid_point
+	if (next_y_diff == -1) then y_speed = 0 end
+--	local x_speed = 1
+--	if (next_y_diff == -1) then
+--		x_speed = 1 / (math.sqrt( (2 + mid_point) / (10) ))
+--	end
+
+	minetest.log("This is y_speed: "..dump(y_speed))
+
+	self.object:set_pos(self_pos)
+	local vel = {x=dir.x * speed, y=y_speed, z=dir.z * speed}
+	self.object:set_velocity(vel)
+	npc.proc.execute_hl_task(self, "npc:move:jump")
+
+end
+
 npc.proc.register_instruction("npc:move:jump", _npc.move.jump)
 
 -- This instruction sets the NPC in motion towards a specific direction at
@@ -2442,17 +2491,41 @@ npc.do_step = function(self, dtime)
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
 
-	-- TODO: Replace with events (which are, scheduled interrupts)
-	-------------------------------------------------------------------------------
-	-- Schedule functionality
-	-- Builds a queue of schedules to be executed on a
-	-- Check all entries in the schedule. Execute all where:
-	--   earliest_start_time <= current_time <= latest_start_time
-	-------------------------------------------------------------------------------
-	-- TODO: DO or not do?
-	-- TODO: ANSWER: Scheduled interrupts are the way to go
+	-- TODO: Implement scheduled interrupts
 	--       e.g. npc:event:schedule(time = 22000, name = "program_name")
 
+	-------------------------------------------------------------------------------
+	-- High-latency tasks
+	if self.process.high_latency_task.active == true then
+		self.timers.hl_task_value = self.timers.hl_task_value + dtime
+		local args = self.process.high_latency_task.args
+		-- Check timeout
+		if (self.timers.hl_task_value >= self.timers.hl_task_int) then
+			if (self.process.high_latency_task.timeout_handler) then
+				self.process.high_latency_task.timeout_handler(self, dtime, args)
+			end
+			self.timers.hl_task_value = 0
+			self.process.high_latency_task.active = false
+			self.process.high_latency_task.args = nil
+			self.process.high_latency_task.handler = nil
+		else
+			local is_finished = false
+			if (self.process.high_latency_task.handler) then
+				is_finished = self.process.high_latency_task.handler(self, dtime, args)
+			else
+				-- If no handler exists, cut it short
+				is_finished = true
+			end
+			if (is_finished == true) then
+				self.process.high_latency_task.active = false
+				self.process.high_latency_task.args = nil
+				self.process.high_latency_task.handler = nil
+			else
+				-- Avoid execution of the process queue
+				return
+			end
+		end
+	end
 
 	-------------------------------------------------------------------------------
 	-- Process functionality
@@ -2494,39 +2567,6 @@ npc.do_step = function(self, dtime)
 			end
 		end
 		--minetest.log("Process: "..dump(self.process))
-
-		-------------------------------------------------------------------------------
-		-- High-latency tasks
-		if self.process.high_latency_task.active == true then
-			self.timers.hl_task_value = self.timers.hl_task_value + dtime
-			local args = self.process.high_latency_task.args
-			-- Check timeout
-			if (self.timers.hl_task_value >= self.timers.hl_task_int) then
-				if (self.process.high_latency_task.timeout_handler) then
-					self.process.high_latency_task.timeout_handler(self, dtime, args)
-				end
-				self.timers.hl_task_value = 0
-				self.process.high_latency_task.active = false
-				self.process.high_latency_task.args = nil
-				self.process.high_latency_task.handler = nil
-			else
-				local is_finished = false
-				if (self.process.high_latency_task.handler) then
-					is_finished = self.process.high_latency_task.handler(self, dtime, args)
-				else
-					-- If no handler exists, cut it short
-					is_finished = true
-				end
-				if (is_finished == true) then
-					self.process.high_latency_task.active = false
-					self.process.high_latency_task.args = nil
-					self.process.high_latency_task.handler = nil
-				else
-					-- Avoid execution of the process queue
-					return
-				end
-			end
-		end
 
 		-------------------------------------------------------------------------------
 		-- Process queue
@@ -2672,7 +2712,7 @@ npc.on_activate = function(self, staticdata)
 			proc_value = 0,
 			proc_int = 0.5,
 			hl_task_value = 0,
-			hl_task_int = 2
+			hl_task_int = 0.15
 		}
 
 		self.process = {
@@ -2893,10 +2933,10 @@ npc.proc.register_program("builtin:follow", {
 ]]--
 
 -----------------------------------------------------------------------------------
--- Built-in high-latency tasks
+-- Built-in low-latency tasks
 -----------------------------------------------------------------------------------
 
-npc.proc.register_high_latency_task("npc:move:jump", function(self, dtime, args)
+npc.proc.register_low_latency_task("npc:move:jump", function(self, dtime, args)
 	local vel = self.object:get_velocity()
 	if (vel.y == 0) then
 		self.object:set_velocity({x=0, y=0, z=0})
@@ -2905,6 +2945,144 @@ npc.proc.register_high_latency_task("npc:move:jump", function(self, dtime, args)
 	end
 	-- Not landed yet
 	return false
+end)
+
+-- Walk instruction using pathfinding and low-latency tasks
+-- This is a possibly expensive operation!
+-- Supports climbing stairs/slabs, jumping and opening doors
+npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime, args)
+	
+	minetest.log("LOW LATENCY Arguments: "..dump(args))
+	local result = false
+	local u_self_pos = self.object:get_pos()
+	local self_pos = vector.round(u_self_pos)
+	local trgt_pos = args.target_pos
+	local speed = args.speed or 2
+
+	-- Calculate process timer interval
+	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
+	self.timers.proc_int = 1/speed
+
+	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_int"] -- or 0.5
+
+	-- Find path
+	if args.check_end_pos_walkable == true then
+		trgt_pos = _npc.env.node_get_accessing_pos(self, trgt_pos)
+	end
+
+	-- Return if target pos is same as start pos
+	if self_pos.x == trgt_pos.x
+		and self_pos.z == trgt_pos.z
+		and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
+		minetest.log("Same self pos and target pos")
+		--minetest.log("Target pos: "..minetest.pos_to_string(trgt_pos))
+		--minetest.log("The original target pos: "..minetest.pos_to_string(args.original_target_pos))
+		-- Stop NPC
+		self.object:set_velocity({x = 0, y = 0, z = 0})
+		-- TODO: Check if animation exists?
+		_npc.model.set_animation(self, {name = "stand"})
+		if args.original_target_pos and
+			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
+			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
+		end
+		-- Restore process timer interval
+		self.timers.proc_int = prev_proc_timer_value
+		return true
+	end
+
+	-- For the purposes of the pathfinder - we assume stepheight = 1.
+	-- TODO: make this configurable. What if we want more than just 1 because
+	-- we have a bigger-than-two-nodes NPC?
+	self.object:set_properties({stepheight = 1})
+	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
+	self.object:set_properties({stepheight = 0.6})
+	if not path then
+		-- Restore process timer interval
+		self.timers.proc_int = prev_proc_timer_value
+		if args.force == true then
+			self.object:move_to(trgt_pos, false)
+		end
+		return nil
+	end
+
+	minetest.log("Path: "..dump(path))
+
+	-- Move towards position
+	local next_node = path[1]
+	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z and #path > 1 then
+		next_node = path[2]
+	end
+
+	local next_pos = next_node.pos
+
+	local dir = vector.direction(self_pos, next_pos)
+	local yaw = minetest.dir_to_yaw(dir)
+
+	-- Store next target pos for position correction
+	-- self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
+	-- self.data.proc[self.process.current.id]["_prev_trgt_dir"] = dir
+
+	-- Rotate towards next node
+	self.object:set_yaw(yaw)
+
+	-- Diagonal movement speed must be increased
+	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
+
+	local next_node_below = minetest.get_node({x=next_pos.x, y=next_pos.y-1, z=next_pos.z})
+
+	-- Small hack: avoid jumping if we are looking at stairs or slabs.
+	-- TODO: Make it better. Maybe, from the NPC's stepheight, create
+	-- a raycast in a 45 grade incline. If the raycast doesn't inersects
+	-- anything, we can walk the incline. Otherwise, we jump.
+	local is_incline = false
+	local is_walkable_incline = false
+	if (next_pos.y >= u_self_pos.y + 1) then
+		is_incline = true
+		if (minetest.get_item_group(next_node_below.name, "stair") > 0
+			or minetest.get_item_group(next_node_below.name, "slab") > 0) then
+			is_walkable_incline = true
+		end
+	end
+
+	if (is_incline and not is_walkable_incline) then
+		-- Jump
+		minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
+		_npc.move.jump(self, {target_pos = next_pos})
+	else
+		local y_speed = 0
+		if (is_walkable_incline == true) then
+			self.data.proc[self.process.current.id]["_do_correct_pos"] = false
+		end
+
+		-- Walk
+		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)
+
+		self.object:set_velocity(vel)
+		_npc.model.set_animation(self, {name = "walk", speed = 30})
+	end
+
+	-- If openable, check the state. If it's open, NPC will close. If it's closed,
+	-- NPC will open and close.
+	if next_node.type == npc.pathfinder.node_types.openable then
+
+		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
+		if (is_open ~= nil) then
+			if (is_open == true) then
+				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
+			elseif (is_open == false) then
+				_npc.env.node_operate(self, {pos=next_pos})
+				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
+			end
+		end
+
+	end
+
+    return false
+
+end)
+
+npc.proc.register_instruction("npc:move:walk_to_pos_ll", function(self, args)
+	npc.proc.execute_hl_task(self, "npc:move:walk_to_pos", args)
 end)
 
 ---------------------------------------------------------------------

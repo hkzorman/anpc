@@ -38,15 +38,16 @@ define program npc:follow
 		@local.reach = 2
 	end
 	
+	@local.actual_pos = npc:obj:get_pos(object = @objs.get[@args.object])
 	@local.target_pos = npc:obj:get_pos(object = @objs.get[@args.object], round = true)
 	if (@local.target_pos ~= nil) then
 		-- If NPC reached close to the player, then stop and face it
 		if (npc:distance_to(pos = @local.target_pos) < @local.reach) then
 			npc:move:stand()
-			npc:move:rotate(target_pos = @local.target_pos)
+			npc:move:rotate(target_pos = @local.actual_pos)
 		-- Else, NPC will continue 
 		else
-			npc:move:walk_to_pos(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false, access_node_search_method = "prefer_closest")
+			npc:move:walk_to_pos_ll(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false, access_node_search_method = "prefer_closest")
 		end
 	end
 end
