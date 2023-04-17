@@ -2207,7 +2207,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	local next_pos = next_node.pos
 
-	local dir = vector.direction(self_pos, next_pos)
+	local dir = vector.direction(u_self_pos, next_pos)
 	local yaw = minetest.dir_to_yaw(dir)
 
 	-- Store next target pos for position correction
@@ -2981,14 +2981,10 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 	end
 
 	local trgt_pos = vector.round(u_trgt_pos)
-	local speed = args.speed or 3.5
+	local speed = args.speed or 3
 	local trgt_distance = args.target_distance or 1.5
-
-	-- Calculate process timer interval
-	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
-	self.timers.proc_int = 1/speed
-
-	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_int"] -- or 0.5
+	
+	local look_at_trgt = args.look_at_target
 
 	-- Find path
 	if args.check_end_pos_walkable == true then
@@ -3002,8 +2998,6 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 		self.object:set_velocity({x = 0, y = 0, z = 0})
 		-- TODO: Check if animation exists?
 		_npc.model.set_animation(self, {name = "stand"})
-		-- Restore process timer interval
-		self.timers.proc_int = prev_proc_timer_value
 		return true
 	end
 
@@ -3014,15 +3008,11 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
 	self.object:set_properties({stepheight = 0.6})
 	if not path then
-		-- Restore process timer interval
-		self.timers.proc_int = prev_proc_timer_value
 		if args.force == true then
 			self.object:move_to(trgt_pos, false)
 		end
 		return nil
 	end
-
-	minetest.log("Path: "..dump(path))
 
 	-- Move towards position
 	local next_node = path[1]
@@ -3032,12 +3022,13 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 
 	local next_pos = next_node.pos
 
-	local dir = vector.direction(self_pos, next_pos)
-	local yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, u_trgt_pos))
-
-	-- Store next target pos for position correction
-	-- self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
-	-- self.data.proc[self.process.current.id]["_prev_trgt_dir"] = dir
+	local dir = vector.direction(u_self_pos, next_pos)
+	local yaw = 0
+	if look_at_trgt then
+		yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, u_trgt_pos))
+	else
+		yaw = minetest.dir_to_yaw(dir)
+	end
 
 	-- Rotate towards next node
 	self.object:set_yaw(yaw)
