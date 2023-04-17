@@ -1931,7 +1931,7 @@ _npc.move.jump = function(self, args)
 	self.object:set_pos(self_pos)
 	local vel = {x=dir.x * speed, y=y_speed, z=dir.z * speed}
 	self.object:set_velocity(vel)
-	npc.proc.execute_hl_task(self, "npc:move:jump")
+	npc.proc.execute_ll_task(self, "npc:move:jump")
 
 end
 
@@ -2395,10 +2395,21 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 	end
 end
 
-npc.proc.execute_hl_task = function(self, name, args)
-	assert(hl_task_table[name] ~= nil, "High-latency task '"..dump(name).."' doesn't exists.'")
+npc.proc.execute_ll_task = function(self, name, args)
+	assert(hl_task_table[name] ~= nil, "Low-latency task '"..dump(name).."' doesn't exists.'")
 
 	local task = hl_task_table[name]
+
+	-- TODO: Decide whether pre-process and evaluate on execution or not.
+	-- Currently wiping out is the solution - this should be fast, which is what ll tasks is about
+	-- Pre-process arguments
+	-- if args then
+	-- 	for key, value in pairs(args) do
+	-- 		if type(value) == "userdata" then
+	-- 			args[key] = _npc.dsl.generate_tracking_record(self, value)
+	-- 		end
+	-- 	end
+	-- end
 
 	self.process.high_latency_task.args = args
 	self.process.high_latency_task.handler = task.handler
@@ -2495,15 +2506,18 @@ npc.do_step = function(self, dtime)
 	--       e.g. npc:event:schedule(time = 22000, name = "program_name")
 
 	-------------------------------------------------------------------------------
-	-- High-latency tasks
+	-- Low-latency tasks
+	-- TODO: Rename everything to low-latency. I confused high latency with faster speeds :')
 	if self.process.high_latency_task.active == true then
 		self.timers.hl_task_value = self.timers.hl_task_value + dtime
+		minetest.log("LL Task interval: "..dump(self.timers.hl_task_value))
 		local args = self.process.high_latency_task.args
 		-- Check timeout
 		if (self.timers.hl_task_value >= self.timers.hl_task_int) then
 			if (self.process.high_latency_task.timeout_handler) then
 				self.process.high_latency_task.timeout_handler(self, dtime, args)
 			end
+			-- Remove low latency task
 			self.timers.hl_task_value = 0
 			self.process.high_latency_task.active = false
 			self.process.high_latency_task.args = nil
@@ -2512,6 +2526,7 @@ npc.do_step = function(self, dtime)
 			local is_finished = false
 			if (self.process.high_latency_task.handler) then
 				is_finished = self.process.high_latency_task.handler(self, dtime, args)
+				minetest.log("Is finished: "..dump(is_finished))
 			else
 				-- If no handler exists, cut it short
 				is_finished = true
@@ -2712,7 +2727,7 @@ npc.on_activate = function(self, staticdata)
 			proc_value = 0,
 			proc_int = 0.5,
 			hl_task_value = 0,
-			hl_task_int = 0.15
+			hl_task_int = 0.1
 		}
 
 		self.process = {
@@ -2776,6 +2791,7 @@ npc.get_staticdata = function(self)
 	end
 
 	if self.process then
+		self.process.high_latency_task = {}
 		result = result..minetest.serialize(self.process).."|"
 	end
 
@@ -2947,17 +2963,26 @@ npc.proc.register_low_latency_task("npc:move:jump", function(self, dtime, args)
 	return false
 end)
 
+-- TODO: This needs to be optimized as much as possible!
 -- Walk instruction using pathfinding and low-latency tasks
 -- This is a possibly expensive operation!
 -- Supports climbing stairs/slabs, jumping and opening doors
 npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime, args)
-	
-	minetest.log("LOW LATENCY Arguments: "..dump(args))
+
 	local result = false
 	local u_self_pos = self.object:get_pos()
 	local self_pos = vector.round(u_self_pos)
-	local trgt_pos = args.target_pos
-	local speed = args.speed or 2
+
+	local u_trgt_pos = nil
+	if args.target then 
+		u_trgt_pos = args.target:get_pos() 
+	else 
+		u_trgt_pos = args.target_pos
+	end
+
+	local trgt_pos = vector.round(u_trgt_pos)
+	local speed = args.speed or 3.5
+	local trgt_distance = args.target_distance or 1.5
 
 	-- Calculate process timer interval
 	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
@@ -2971,20 +2996,12 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 	end
 
 	-- Return if target pos is same as start pos
-	if self_pos.x == trgt_pos.x
-		and self_pos.z == trgt_pos.z
-		and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
-		minetest.log("Same self pos and target pos")
-		--minetest.log("Target pos: "..minetest.pos_to_string(trgt_pos))
-		--minetest.log("The original target pos: "..minetest.pos_to_string(args.original_target_pos))
-		-- Stop NPC
+	-- Return if distance is less than certain distance
+	local distance = vector.distance(u_self_pos, u_trgt_pos)
+	if distance <= trgt_distance then
 		self.object:set_velocity({x = 0, y = 0, z = 0})
 		-- TODO: Check if animation exists?
 		_npc.model.set_animation(self, {name = "stand"})
-		if args.original_target_pos and
-			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
-			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
-		end
 		-- Restore process timer interval
 		self.timers.proc_int = prev_proc_timer_value
 		return true
@@ -3016,7 +3033,7 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 	local next_pos = next_node.pos
 
 	local dir = vector.direction(self_pos, next_pos)
-	local yaw = minetest.dir_to_yaw(dir)
+	local yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, u_trgt_pos))
 
 	-- Store next target pos for position correction
 	-- self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
@@ -3050,9 +3067,6 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 		_npc.move.jump(self, {target_pos = next_pos})
 	else
 		local y_speed = 0
-		if (is_walkable_incline == true) then
-			self.data.proc[self.process.current.id]["_do_correct_pos"] = false
-		end
 
 		-- Walk
 		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)
@@ -3082,7 +3096,8 @@ npc.proc.register_low_latency_task("npc:move:walk_to_pos", function(self, dtime,
 end)
 
 npc.proc.register_instruction("npc:move:walk_to_pos_ll", function(self, args)
-	npc.proc.execute_hl_task(self, "npc:move:walk_to_pos", args)
+	self.timers.hl_task_int = 30
+	npc.proc.execute_ll_task(self, "npc:move:walk_to_pos", args)
 end)
 
 ---------------------------------------------------------------------
