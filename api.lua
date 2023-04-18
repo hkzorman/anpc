@@ -2103,7 +2103,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	-- Calculate process timer interval
 	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
-	self.timers.proc_int = 1/speed
+	self.timers.proc_int = (1/speed) / 2
 
 	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_int"]-- or 0.5
 
@@ -2115,52 +2115,52 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	-- Correct self pos if NPC is lagging behind
 	minetest.log("Before correction pos: "..minetest.pos_to_string(self.object:get_pos()))
 	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"]
-	if (prev_trgt_pos ~= nil
-		and self.data.proc[self.process.current.id]["_do_correct_pos"] ~= false) then
-		local dist = vector.distance(prev_trgt_pos, u_self_pos)
-		if (dist > 0.25) then
-			-- Expensive(?) check to see that we are not going backwards
-			-- when correcting position... wonder if it's worth it.
-			-- This checks that the direction from the NPC's position to the
-			-- previous target (from last iteration) is not pointing backwards
-			-- (from the NPC perspective).
-			--
-			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
-			 local prev_yaw = minetest.dir_to_yaw(prev_dir)
-			 local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
-			 local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
-			 local min_yaw = prev_yaw - math.pi/2
-			 local max_yaw = prev_yaw + math.pi/2
+-- 	if (prev_trgt_pos ~= nil
+-- 		and self.data.proc[self.process.current.id]["_do_correct_pos"] ~= false) then
+-- 		local dist = vector.distance(prev_trgt_pos, u_self_pos)
+-- 		if (dist > 0.25) then
+-- 			-- Expensive(?) check to see that we are not going backwards
+-- 			-- when correcting position... wonder if it's worth it.
+-- 			-- This checks that the direction from the NPC's position to the
+-- 			-- previous target (from last iteration) is not pointing backwards
+-- 			-- (from the NPC perspective).
+-- 			--
+-- 			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
+-- 			 local prev_yaw = minetest.dir_to_yaw(prev_dir)
+-- 			 local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+-- 			 local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
+-- 			 local min_yaw = prev_yaw - math.pi/2
+-- 			 local max_yaw = prev_yaw + math.pi/2
 
-			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw)
-			    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
-				  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
-				  -- This removes some annoying jumping
-				  local trgt_y = prev_trgt_pos.y
-				  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
-				  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
-				  self_pos = prev_trgt_pos
-			 end
+-- 			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw)
+-- 			    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
+-- 				  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+-- 				  -- This removes some annoying jumping
+-- 				  local trgt_y = prev_trgt_pos.y
+-- 				  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+-- 				  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+-- 				  self_pos = prev_trgt_pos
+-- 			 end
 
-			-- Simplified check for the same thing above. This checks that the direction
-			-- is not *exactly* the opposite as the current dir. This *will not* catch
-			-- every single instance of annoying back-jumps, but is a very simple check.
---			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
---			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
---
---			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
---				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(u_self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
---				-- This removes some annoying jumping
---				local trgt_y = prev_trgt_pos.y
---				--if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
---				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
---				self_pos = prev_trgt_pos
---			end
-		end
-	else
-		-- Let correction work on next call
-		self.data.proc[self.process.current.id]["_do_correct_pos"] = nil
-	end
+-- 			-- Simplified check for the same thing above. This checks that the direction
+-- 			-- is not *exactly* the opposite as the current dir. This *will not* catch
+-- 			-- every single instance of annoying back-jumps, but is a very simple check.
+-- --			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
+-- --			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
+-- --
+-- --			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
+-- --				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(u_self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
+-- --				-- This removes some annoying jumping
+-- --				local trgt_y = prev_trgt_pos.y
+-- --				--if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
+-- --				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
+-- --				self_pos = prev_trgt_pos
+-- --			end
+-- 		end
+-- 	else
+-- 		-- Let correction work on next call
+-- 		self.data.proc[self.process.current.id]["_do_correct_pos"] = nil
+-- 	end
 
 	-- Return if target pos is same as start pos
 	if self_pos.x == trgt_pos.x
