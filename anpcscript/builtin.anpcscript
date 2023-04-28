@@ -47,7 +47,7 @@ define program npc:follow
 			npc:move:rotate(target_pos = @local.actual_pos)
 		-- Else, NPC will continue 
 		else
-			npc:move:walk_to_pos_ll(target_pos = @local.target_pos, original_target_pos = @local.target_pos, check_end_pos_walkable = false, access_node_search_method = "prefer_closest")
+			npc:move:walk_to_pos_ll(target = @objs.get[@args.object], original_target_pos = @local.target_pos, check_end_pos_walkable = false, access_node_search_method = "prefer_closest")
 		end
 	end
 end
