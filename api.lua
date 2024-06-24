@@ -127,7 +127,7 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 				end
 				
 				-- Check if the key is a number - if so, we should use a key of type number
-				if type(key) == "string" and string.find(key, "^%d+$") > -1 then
+				if type(key) == "string" and string.find(key, "^%d+$") ~= nil and string.find(key, "^%d+$") > -1 then
 					key = tonumber(key)
 				end
 			else
@@ -222,6 +222,12 @@ _npc.dsl.evaluate_argument = function(self, expr, args, local_vars)
 			-- Check if there's a third argument.
 			-- Supported third argument:
 			--   - `length`: if object is a table, returns length of table
+			--minetest.log("[e] On third argument..."..dump(key))
+			--minetest.log("[e] Storage type: "..dump(storage_type))
+			--minetest.log("[e] Result: "..dump(_npc.dsl.get_var(self, second_arg)))
+			--minetest.log("[e] Second arg: "..dump(second_arg))
+			--minetest.log("[e] result="..dump(result))
+			--if type(result) == "table" then minetest.log("[e] result[key]="..dump(result[key])) end
 			if third_arg then
 				if third_arg == "length" then
 					if not result then return -1 end
@@ -332,6 +338,12 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 		end
 	end
 
+	-- Handle table with variables
+	-- Currently, only first-level keys are checked for performance reasons
+	if type(value) == "table" then
+
+	end
+
 	if subkey and type(storage[key]) == "table" then
 		storage[key][subkey] = value
 	else
@@ -340,6 +352,7 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 end
 
 _npc.dsl.get_var = function(self, key)
+	--minetest.log("Data: "..dump(self.data.proc[self.process.current.id]))
 	if self.data.proc[self.process.current.id] == nil then return nil end
 	local result = self.data.proc[self.process.current.id][key]
 
@@ -1144,6 +1157,10 @@ end)
 -----------------------------------------------------------------------------------
 -- Utilities instructions
 -----------------------------------------------------------------------------------
+npc.proc.register_instruction("npc:debug", function(self, args)
+	minetest.log("[npc:debug] "..dump(args.msg).." [val]="..dump(args.val))
+end)
+
 npc.proc.register_instruction("npc:random", function(self, args)
 	if args.start and args["end"] then
 		return math.random(args.start, args["end"])
@@ -1168,23 +1185,29 @@ end)
 --   - x: must be a vector
 --   - y: can be a vector or number. If vector, operation is applied component by component.
 --        If number, then same number is added to all vector components
-npc.proc.register_instruction("npc:vector:add", function(self, args)
+npc.proc.register_instruction("npc:util:vector:add", function(self, args)
 	local x = args.x
 	local y = args.y
-	if type(y) == "object" then
-	end
+	--minetest.log("x: "..dump(x)..", y: "..dump(y))
+	return vector.add(x, y)
 end)
 
-npc.proc.register_instruction("npc:vector:subtract", function(self, args)
-
+npc.proc.register_instruction("npc:util:vector:subtract", function(self, args)
+	local x = args.x
+	local y = args.y
+	return vector.subtract(x, y)
 end)
 
-npc.proc.register_instruction("npc:vector:add", function(self, args)
-
+npc.proc.register_instruction("npc:util:vector:multiply", function(self, args)
+	local x = args.x
+	local y = args.y
+	return vector.multiply(x, y)
 end)
 
-npc.proc.register_instruction("npc:vector:add", function(self, args)
-
+npc.proc.register_instruction("npc:util:vector:divide", function(self, args)
+	local x = args.x
+	local y = args.y
+	return vector.divide(x, y)
 end)
 
 -----------------------------------------------------------------------------------
@@ -1641,6 +1664,8 @@ end
 _npc.env.node_place = function(self, args)
 	local pos = args.pos
     local node = args.node
+	local param1 = args.param1
+	local param2 = args.param2
     local source = args.source or "forced"
     local bypass_protection = args.bypass_protection
     if bypass_protection == nil then bypass_protection = false end
@@ -1667,12 +1692,9 @@ _npc.env.node_place = function(self, args)
             -- Place node
             if place_item == true then
                 -- Set mine animation
-                self.object:set_animation({
-                    x = npc.ANIMATION_MINE_START,
-                    y = npc.ANIMATION_MINE_END},
-                    self.animation.speed_normal, 0)
+                _npc.model.set_animation(self, {name = "mine_once"})
                 -- Place node
-                minetest.set_node(pos, {name=node})
+                minetest.set_node(pos, {name=node, param1=param1, param2=param2})
                 -- Play place sound
                 if play_sound == true then
                     if minetest.registered_nodes[node].sounds then
@@ -1771,6 +1793,56 @@ npc.proc.register_instruction("npc:env:node:dig", function(self, args)
    	end
 end)
 
+-- Use this when you need the NPC to do a `minetest.set_node`.
+-- This will not check for protection, or check if the node is buildable, etc.
+npc.proc.register_instruction("npc:env:node:set", function(self, args)
+	local pos = args.pos
+	local node = args.node
+	local param1 = args.param1
+	local param2 = args.param2
+	if pos and node then
+		minetest.log("NPC Replacing node at "..minetest.pos_to_string(pos))
+		_npc.model.set_animation(self, {name = "mine_once"})
+		minetest.set_node(pos, {name=node, param1=param1, param2=param2})
+	end
+end)
+
+npc.proc.register_instruction("npc:env:node:set_metadata", function(self, args)
+	local pos = args.pos
+	if pos then
+		local meta = minetest.get_meta(args.pos)
+		meta:set_string("infotext", args.meta)
+	end
+end)
+
+-- Gets the node at the given position
+npc.proc.register_instruction("npc:env:node:get", function(self, args)
+	local pos = args.pos
+	if pos then
+		return minetest.get_node_or_nil(pos)
+	end
+end)
+
+npc.proc.register_instruction("npc:env:node:get_metadata", function(self, args)
+	local pos = args.pos
+	if pos then
+		return minetest.get_meta(args.pos)
+	end
+end)
+
+npc.proc.register_instruction("npc:chat:send_player", function(self, args)
+	minetest.chat_send_player(args.player, args.message)
+end)
+
+npc.proc.register_instruction("npc:util:str:replace", function(self, args)
+	local str = args.str
+	local target = args.target
+	local replacement = args.replacement
+	if str then
+		return string.gsub(str, target, replacement)
+	end
+end)
+
 --TODO: Add calculation for surrounding air nodes if node is walkable
 npc.proc.register_instruction("npc:env:find_path", function(self, args)
 
@@ -1848,7 +1920,7 @@ end)
 npc.proc.register_instruction("npc:obj:get_dir", function(self, args)
 	local obj = args.object
 	if obj and type(obj) == "userdata" then
-		return minetest.yaw_to_dir(obj:get_yaw())
+		if args.round then return vector.round(minetest.yaw_to_dir(obj:get_yaw())) else return minetest.yaw_to_dir(obj:get_yaw()) end		
 	else
 		return nil
 	end
@@ -2334,6 +2406,7 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		self.process.current.instruction = self.process.current.instruction + 1
 
 		local instruction = program_table[self.process.current.name].instructions[self.process.current.instruction]
+		--minetest.log("[exec_instr] "..dump(instruction))
 		if instruction then
 			-- Break at this point if breakpoint is found
 			if instruction.pause == true and not instruction.override and is_dev_mode == true then
@@ -2478,7 +2551,7 @@ npc.do_step = function(self, dtime)
 	if self.process.low_latency_task.active == true then
 		self.timers.hl_task_value = self.timers.hl_task_value + dtime
 		--minetest.log("LL Task interval: "..dump(self.timers.hl_task_value))
-		minetest.log("Active LL task: "..dump(self.process.low_latency_task.name))
+		--minetest.log("Active LL task: "..dump(self.process.low_latency_task.name))
 		local args = self.process.low_latency_task.args
 		local is_finished = false
 		-- Check timeout
@@ -2490,7 +2563,7 @@ npc.do_step = function(self, dtime)
 		else
 			if (self.process.low_latency_task.handler) then
 				is_finished = self.process.low_latency_task.handler(self, dtime, args)
-				minetest.log("Is finished: "..dump(is_finished))
+				--minetest.log("Is finished: "..dump(is_finished))
 			else
 				-- If no handler exists, cut it short
 				is_finished = true
@@ -2670,7 +2743,7 @@ npc.do_step = function(self, dtime)
 				instruction.override = false
 			end
 			
-			--minetest.log("Current instruction: "..dump(instruction))
+			--minetest.log("[do_step] Current instruction: "..dump(instruction))
 			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
             --minetest.log("Next 2")
             if self.process.program_changed == false then
@@ -2858,80 +2931,6 @@ npc.proc.register_program("builtin:idle", {
 		}}}
 })
 
---[[
-npc.proc.register_program("builtin:walk_to_pos", {
-	{name = "npc:var:set", args = {
-		key = "has_reached_pos",
-		value = false
-	}},
-	{key = "end_pos", name = "npc:env:node:get_accessing_pos", args = {
-		pos = "@args.end_pos",
-		force = "@args.force_accessing_node"
-	}},
-	{name = "npc:while", args = {
-		expr = {
-			left = "@local.has_reached_pos",
-			op   = "==",
-			right = false
-		},
-		loop_instructions = {
-			{key = "has_reached_pos", name = "npc:move:walk_to_pos", args = {
-				target_pos = "@local.end_pos",
-				original_target_pos = "@args.end_pos",
-				check_end_pos_walkable = false
-			}},
-			{name = "npc:if", args = {
-				expr = {
-					left = "@local.has_reached_pos",
-					op   = "==",
-					right = nil
-				},
-				true_instructions = {
-					{name = "npc:break"}
-				}
-			}}
-		}
-	}}
-})
-
-npc.proc.register_program("builtin:follow", {
-	{name="npc:set_proc_interval", args={value = 0.25}},
-	{name = "npc:var:set", args = { key = "target_pos", value = function(self, args) 
-		local object_to_follow = self.process.current.args.object
-		if (object_to_follow and object_to_follow:get_pos()) then
-			return _npc.env.node_get_accessing_pos(self, {pos = vector.round(object_to_follow:get_pos())})
-		end
-	end}},
-	{name = "npc:if", args = {
-		expr = {
-			left  = "@local.target_pos",
-			op    = "~=",
-			right = nil
-		},
-		true_instructions = {
-			-- Check if NPC arrived to the expected position
-			{name = "npc:if", args = {
-				expr = function(self, args, local_v)
-					return vector.equals(vector.round(self.object:get_pos()), local_v.target_pos)
-				end,
-				true_instructions = {
-					-- Stand
-					{name = "npc:move:stand", args = {}}
-				},
-				false_instructions = {
-					-- Move to target pos
-					{name = "npc:execute", args = {
-						name = "builtin:walk_to_pos",
-						args = {
-							end_pos = "@local.target_pos",
-						}
-					}}
-				}
-			}}
-		}	
-	}
-]]--
-
 -----------------------------------------------------------------------------------
 -- Built-in low-latency tasks
 -----------------------------------------------------------------------------------
@@ -2961,7 +2960,7 @@ npc.proc.register_low_latency_task("npc:move:walk_to", function(self, dtime, arg
 	local u_self_pos = self.object:get_pos()
 	local self_pos = vector.round(u_self_pos)
 
-	minetest.log("Args: "..dump(args))
+	--minetest.log("Args: "..dump(args))
 
 	local u_trgt_pos = nil
 	if args.target then
@@ -2999,10 +2998,13 @@ npc.proc.register_low_latency_task("npc:move:walk_to", function(self, dtime, arg
 		return true
 	end
 
+
+	minetest.log("No path: "..dump(path == nil or #path == 0))
+
 	if (path == nil or #path == 0)
 		--or (self_prev_pos ~= nil and vector.distance(self_prev_pos, u_self_pos) < min_self_move_distance)
 		or (trgt_prev_pos ~= nil and vector.distance(trgt_prev_pos, u_trgt_pos) > min_trgt_move_distance) then
-			minetest.log("Using pathfinder...")
+			--minetest.log("Using pathfinder...")
 			self.object:set_properties({stepheight = 1})
 			path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
 			self.object:set_properties({stepheight = 0.6})
@@ -3063,11 +3065,11 @@ npc.proc.register_low_latency_task("npc:move:walk_to", function(self, dtime, arg
 
 	if (is_incline and not is_walkable_incline) then
 		-- Jump
-		minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
+		--minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
 		_npc.move.jump(self, {target_pos = next_pos})
 	else
 		local y_speed = self.object:get_velocity().y
-		minetest.log("Walking walking to "..dump(minetest.pos_to_string(dir)))
+		--minetest.log("Walking to "..dump(minetest.pos_to_string(dir)))
 
 		-- Walk
 		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)

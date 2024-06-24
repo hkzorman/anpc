@@ -40,6 +40,12 @@ define program npc:follow
 	
 	@local.actual_pos = npc:obj:get_pos(object = @objs.get[@args.object])
 	@local.target_pos = npc:obj:get_pos(object = @objs.get[@args.object], round = true)
+
+	-- Get the position immediately behind the following
+	--@local.current_dir = npc:obj:get_dir(object = @objs.get[@arg.object])
+	--@local.opposite_dir = npc:util:vector:multiply(x = @local.current_dir, y = -1)
+	--@local.target_pos = npc:util:vector:subtract(x = @local.current_pos, y = @local.opposite_dir)
+
 	if (@local.target_pos ~= nil) then
 		-- If NPC reached close to the player, then stop and face it
 		if (npc:distance_to(pos = @local.target_pos) < @local.reach) then
