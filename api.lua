@@ -1344,15 +1344,24 @@ _npc.env.node_get_accessing_pos = function(self, args)
 					cpos.z = cpos.z -1
 				end
 
-				local dist = vector.distance(self_pos, cpos)
-				if (dist < min_distance) then
-					min_distance = dist
-					closest_pos = cpos
-				end
+				-- Only passable cells are usable access positions: the
+				-- NPC walks to stand IN the cell, so a solid candidate can
+				-- never be reached (and when the target level was flattened
+				-- to the NPC's own ground, a solid target degenerates into
+				-- a 1-node "path" to the NPC's own cell, which locks the
+				-- walk instruction in a re-arm loop - see pathfinder.lua).
+				local node = minetest.get_node(cpos)
+				local passable = (node ~= nil and node.name ~= nil
+					and minetest.registered_nodes[node.name] ~= nil
+					and minetest.registered_nodes[node.name].walkable == false)
+				if passable then
+					local dist = vector.distance(self_pos, cpos)
+					if (dist < min_distance) then
+						min_distance = dist
+						closest_pos = cpos
+					end
 
-				if search_method == "prefer_first" then
-					local node = minetest.get_node(cpos)
-					if node and node.name and minetest.registered_nodes[node.name].walkable == false then
+					if search_method == "prefer_first" then
 						minetest.log("Returning this accessing pos: "..minetest.pos_to_string(cpos))
 						return cpos
 					end
@@ -1361,7 +1370,48 @@ _npc.env.node_get_accessing_pos = function(self, args)
 			end
 
 			if search_method == "prefer_closest" then
-				return closest_pos
+				-- If no passable cell exists at the flattened level (the
+				-- target sits on a platform above or below the NPC's own
+				-- ground), retry the four neighbours at the target's own
+				-- level: that is where a standable cell beside the target
+				-- can be.
+				if closest_pos == nil and pos.y ~= args.pos.y then
+					local retry_count = 0
+					while retry_count < 4 do
+						local cpos2 = {
+							x = pos.x,
+							y = args.pos.y,
+							z = pos.z
+						}
+						if retry_count == 0 then
+							cpos2.x = cpos2.x + 1
+						elseif retry_count == 1 then
+							cpos2.z = cpos2.z + 1
+						elseif retry_count == 2 then
+							cpos2.x = cpos2.x - 1
+						elseif retry_count == 3 then
+							cpos2.z = cpos2.z - 1
+						end
+						local n2 = minetest.get_node(cpos2)
+						if n2 ~= nil and n2.name ~= nil
+							and minetest.registered_nodes[n2.name] ~= nil
+							and minetest.registered_nodes[n2.name].walkable == false then
+							local dist = vector.distance(self_pos, cpos2)
+							if (dist < min_distance) then
+								min_distance = dist
+								closest_pos = cpos2
+							end
+						end
+						retry_count = retry_count + 1
+					end
+				end
+				if closest_pos ~= nil then
+					return closest_pos
+				end
+				-- Nothing passable beside the target at either level: fall
+				-- through to `return args.pos` below; the walk to the
+				-- target itself then fails cleanly (the pathfinder reports
+				-- nil) instead of returning an unreachable solid cell.
 			end
 		else
 			return pos
@@ -1978,39 +2028,64 @@ _npc.move.jump = function(self, args)
 	local speed = args.speed or 1
 
 	local self_pos = vector.round(self.object:get_pos())
-	local dir = vector.direction(self_pos, trgt_pos)
+	local dir = vector.normalize(vector.direction(self_pos, trgt_pos))
 
-	-- Checks nodes in front to
-	local next_pos_front = {x = self_pos.x + dir.x, y = self_pos.y, z = self_pos.z + dir.y}
-	local next_pos_below = {x = self_pos.x + dir.x, y = self_pos.y - 1, z = self_pos.z + dir.z}
+	-- Pick the arc from the vertical difference between the target
+	-- and the NPC. The previous implementation sampled `self_pos + dir`
+	-- (with dir the normalized 3D direction); whenever the target is
+	-- above the NPC (dir.y > 0), the sampled y becomes fractional and
+	-- get_node's truncation lands on the NPC's own level, so the step
+	-- block is never seen - in particular for diagonal steps - and the
+	-- default 0.58-peak arc is used, which can never clear a 1-block
+	-- step.
 	local next_y_diff = 0
-
-	local next_nod = minetest.get_node(next_pos_front)
-	if (next_nod.name ~= "air" and minetest.registered_nodes[next_nod.name].walkable == true) then
+	if (trgt_pos.y >= self_pos.y + 1) then
 		next_y_diff = 1
 		range = 2
-	else
-		next_nod = minetest.get_node(next_pos_below)
-		if (next_nod.name == "air") then
-			range = 0.5
-			next_y_diff = -1
-		end
+	elseif (trgt_pos.y <= self_pos.y - 1) then
+		next_y_diff = -1
+		range = 0.5
 	end
 
-	local mid_point = (self.collisionbox[5] - self.collisionbox[2]) / 2
-
-	-- Based on range, doesn't takes time into account
-	local y_speed = math.sqrt ( (10 * range) / (math.sin(2 * (math.pi / 3))) ) + mid_point
+	-- Based on range, doesn't take time into account
+	local y_speed = math.sqrt((10 * range) / (math.sin(2 * (math.pi / 3))))
+	local travel = range
 	if (next_y_diff == -1) then y_speed = 0 end
---	local x_speed = 1
---	if (next_y_diff == -1) then
---		x_speed = 1 / (math.sqrt( (2 + mid_point) / (10) ))
---	end
+	if (next_y_diff == 1) then
+		-- Minimal step-up jump: launch at the lowest speed that still
+		-- clears the step. A ballistic arc launched at speed v under
+		-- gravity g = 10 peaks at v^2 / (2 * g) above takeoff, so the
+		-- minimum launch speed reaching a required rise h is
+		-- v = sqrt(2 * g * h). The collision box bottom must rise one
+		-- block plus the engine's 0.5-sunk rest offset to get above the
+		-- step top, so the minimal jump speed for a step-up is
+		-- v = sqrt(2 * 10 * rise) with rise = trgt_y - self_y + 0.5.
+		-- This is the exact minimum jump for the step; the previous
+		-- fixed arc (peak 1.6) overshot the required rise of ~1.5.
+		local rise = trgt_pos.y - self_pos.y + 0.5
+		y_speed = math.sqrt(2 * 10 * rise)
+		-- Land exactly on the step top: travel the horizontal distance
+		-- from takeoff to the target instead of a fixed overshoot, so
+		-- the NPC lands on the intended block instead of the faced edge.
+		local jump_dx = trgt_pos.x - self_pos.x
+		local jump_dz = trgt_pos.z - self_pos.z
+		travel = math.sqrt(jump_dx * jump_dx + jump_dz * jump_dz)
+	end
 
-	minetest.log("This is y_speed: "..dump(y_speed))
+	-- Horizontal speed such that the NPC actually crosses the travel
+	-- distance during the expected airtime.
+	local x_speed = speed
+	if (y_speed > 0) then
+		local airtime = 2 * y_speed / 10
+		x_speed = travel / airtime
+		-- Give the landing task a generous timeout so that a jump is
+		-- never cut off mid-air.
+		self.timers.hl_task_int = airtime * 2 + 0.5
+	else
+		self.timers.hl_task_int = 1.5
+	end
 
-	self.object:set_pos(self_pos)
-	local vel = {x=dir.x * speed, y=y_speed, z=dir.z * speed}
+	local vel = {x=dir.x * x_speed, y=y_speed, z=dir.z * x_speed}
 	self.object:set_velocity(vel)
 	npc.proc.execute_ll_task(self, "npc:move:jump")
 
@@ -2125,134 +2200,277 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 	_npc.model.set_animation(self, {name = "walk", speed = 30})
 end)
 
--- Walk instruction using pathfinding
--- Supports position lag correction, climbing stairs/slabs, jumping and opening doors
-npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
-	minetest.log("Arguments: "..dump(args))
-	local result = false
-	local u_self_pos = self.object:get_pos()
-	local self_pos = vector.round(u_self_pos)
-	local trgt_pos = args.target_pos
-	local speed = args.speed or 2
+-----------------------------------------------------------------------------------
+-- Navigation (npc.nav)
+-----------------------------------------------------------------------------------
+-- Unified path-based navigation backing the walk instructions.
+--
+-- A navigation session lives in self.data.nav and is owned by this
+-- section: planning (npc.pathfinder), per-tick steering (node
+-- advancement, aiming, stair/slab inclines, jumps, doors) and
+-- arrival / stuck handling.
+--
+-- Entry points (thin wrappers around this section):
+--   npc:move:walk_to_pos     proc, cell arrival, speed 2
+--   npc:move:walk_to_pos_ll  proc -> ll task, distance arrival, speed 3
+--
+-- Both entry points are driven per-tick by the low-latency task
+-- "npc:move:walk_to" (npc.nav.step).
+--
+-- A session is (re)armed with npc.nav.start(). Re-arming with the
+-- same target cell keeps the cached path and the stuck accumulators
+-- (npc:follow re-arms every 0.25 s and must not reset the 1 s stuck
+-- window); a different target cell resets them.
 
-	-- Calculate process timer interval
-	self.data.proc[self.process.current.id]["_prev_proc_int"] = self.timers.proc_int
-	self.timers.proc_int = (1/speed) / 2
+npc.nav = {}
 
-	local prev_proc_timer_value = self.data.proc[self.process.current.id]["_prev_proc_int"]-- or 0.5
-
-	-- Find path
-	if args.check_end_pos_walkable == true then
-		trgt_pos = _npc.env.node_get_accessing_pos(self, trgt_pos)
+-- Ensure the session table exists (staticdata from before this
+-- section lacks it) and return it.
+function npc.nav.session(self)
+	if self.data.nav == nil then
+		self.data.nav = {}
 	end
+	return self.data.nav
+end
 
-	-- Correct self pos if NPC is lagging behind
-	minetest.log("Before correction pos: "..minetest.pos_to_string(self.object:get_pos()))
-	local prev_trgt_pos = self.data.proc[self.process.current.id]["_prev_trgt_pos"]
--- 	if (prev_trgt_pos ~= nil
--- 		and self.data.proc[self.process.current.id]["_do_correct_pos"] ~= false) then
--- 		local dist = vector.distance(prev_trgt_pos, u_self_pos)
--- 		if (dist > 0.25) then
--- 			-- Expensive(?) check to see that we are not going backwards
--- 			-- when correcting position... wonder if it's worth it.
--- 			-- This checks that the direction from the NPC's position to the
--- 			-- previous target (from last iteration) is not pointing backwards
--- 			-- (from the NPC perspective).
--- 			--
--- 			 local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
--- 			 local prev_yaw = minetest.dir_to_yaw(prev_dir)
--- 			 local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
--- 			 local yaw_to_prev_pos = minetest.dir_to_yaw(dir_to_prev_pos)
--- 			 local min_yaw = prev_yaw - math.pi/2
--- 			 local max_yaw = prev_yaw + math.pi/2
-
--- 			 if (min_yaw <= yaw_to_prev_pos and yaw_to_prev_pos <= max_yaw)
--- 			    or (prev_trgt_pos.x == trgt_pos.x and prev_trgt_pos.z == trgt_pos.z) then
--- 				  minetest.log("Corrected NPC pos from "..minetest.pos_to_string(self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
--- 				  -- This removes some annoying jumping
--- 				  local trgt_y = prev_trgt_pos.y
--- 				  if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
--- 				  self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
--- 				  self_pos = prev_trgt_pos
--- 			 end
-
--- 			-- Simplified check for the same thing above. This checks that the direction
--- 			-- is not *exactly* the opposite as the current dir. This *will not* catch
--- 			-- every single instance of annoying back-jumps, but is a very simple check.
--- --			local prev_dir = self.data.proc[self.process.current.id]["_prev_trgt_dir"]
--- --			local dir_to_prev_pos = vector.direction(u_self_pos, prev_trgt_pos)
--- --
--- --			if (dir_to_prev_pos ~= vector.multiply(prev_dir, -1)) then
--- --				minetest.log("Corrected NPC pos from "..minetest.pos_to_string(u_self_pos).." to "..minetest.pos_to_string(prev_trgt_pos))
--- --				-- This removes some annoying jumping
--- --				local trgt_y = prev_trgt_pos.y
--- --				--if (math.abs(trgt_y - u_self_pos.y) < 1) then trgt_y = u_self_pos.y end
--- --				self.object:move_to({x=prev_trgt_pos.x, y=trgt_y, z=prev_trgt_pos.z}, true)
--- --				self_pos = prev_trgt_pos
--- --			end
--- 		end
--- 	else
--- 		-- Let correction work on next call
--- 		self.data.proc[self.process.current.id]["_do_correct_pos"] = nil
--- 	end
-
-	-- Return if target pos is same as start pos
-	if self_pos.x == trgt_pos.x
-		and self_pos.z == trgt_pos.z
-		and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
-		minetest.log("Same self pos and target pos")
-		--minetest.log("Target pos: "..minetest.pos_to_string(trgt_pos))
-		--minetest.log("The original target pos: "..minetest.pos_to_string(args.original_target_pos))
-		-- Stop NPC
-		self.object:set_velocity({x = 0, y = 0, z = 0})
-		-- TODO: Check if animation exists?
-		_npc.model.set_animation(self, {name = "stand"})
-		if args.original_target_pos and
-			(args.original_target_pos.x ~= trgt_pos.x or args.original_target_pos.z ~= trgt_pos.z) then
-			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(trgt_pos, args.original_target_pos)))
-		end
-		-- Restore process timer interval
-		self.timers.proc_int = prev_proc_timer_value
-		return true
-	end
-
+-- Plan a decorated path from the NPC's current cell to trgt_pos.
+-- Returns the path, or nil.
+function npc.nav._find_path(self, trgt_pos)
 	-- For the purposes of the pathfinder - we assume stepheight = 1.
 	-- TODO: make this configurable. What if we want more than just 1 because
 	-- we have a bigger-than-two-nodes NPC?
+	-- (Keep the original value so we don't hardcode the per-entity default.)
+	local self_pos = vector.round(self.object:get_pos())
+	local prev_stepheight = self.object:get_properties().stepheight or 0.6
 	self.object:set_properties({stepheight = 1})
 	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
-	self.object:set_properties({stepheight = 0.6})
-	if not path then
-		-- Restore process timer interval
-		self.timers.proc_int = prev_proc_timer_value
-		if args.force == true then
-			self.object:move_to(trgt_pos, false)
+	self.object:set_properties({stepheight = prev_stepheight})
+	return path
+end
+
+-- Shared stand-down: zero the velocity, play the stand animation, and
+-- (when look_at_pos is given) face the original target if it is a
+-- different cell than the accessed one.
+function npc.nav._stand(self, look_at_pos)
+	self.object:set_velocity({x = 0, y = 0, z = 0})
+	-- TODO: Check if animation exists?
+	_npc.model.set_animation(self, {name = "stand"})
+	local nav = self.data.nav
+	if look_at_pos ~= nil and nav.original_target_pos ~= nil
+		and (nav.original_target_pos.x ~= look_at_pos.x
+			or nav.original_target_pos.z ~= look_at_pos.z) then
+		self.object:set_yaw(minetest.dir_to_yaw(vector.direction(look_at_pos, nav.original_target_pos)))
+	end
+end
+
+-- Start (or re-arm) a navigation session.
+-- args: target | target_pos, speed, target_distance, look_at_target,
+--       original_target_pos, check_end_pos_walkable, force,
+--       min_self_move_distance, min_trgt_move_distance
+-- defaults: per-entry-point values (speed, arrive_rule, target_distance)
+-- Returns "arrived" | "failed" | "moving".
+function npc.nav.start(self, args, defaults)
+	local nav = npc.nav.session(self)
+
+	local speed = args.speed or (defaults ~= nil and defaults.speed) or 2
+	local arrive_rule = (defaults ~= nil and defaults.arrive_rule) or "distance"
+	local target_distance = args.target_distance or (defaults ~= nil and defaults.target_distance) or 1.5
+
+	-- Resolve the target
+	local trgt = args.target
+	local u_trgt_pos
+	if trgt ~= nil then
+		u_trgt_pos = trgt:get_pos()
+	elseif args.target_pos ~= nil then
+		u_trgt_pos = args.target_pos
+	end
+	if u_trgt_pos == nil then
+		-- Cannot find a target to walk to
+		nav.active = false
+		nav.last_status = "failed"
+		return "failed"
+	end
+
+	local trgt_pos = vector.round(u_trgt_pos)
+	if args.check_end_pos_walkable == true and trgt == nil then
+		trgt_pos = _npc.env.node_get_accessing_pos(self, trgt_pos)
+	end
+
+	-- A re-arm with the same target cell keeps the cached path and the
+	-- stuck accumulators; a different target cell starts fresh.
+	local same_target = (nav.active == true)
+		and (nav.u_trgt_pos ~= nil)
+		and (vector.round(nav.u_trgt_pos).x == trgt_pos.x
+			and vector.round(nav.u_trgt_pos).z == trgt_pos.z
+			and math.abs(vector.round(nav.u_trgt_pos).y - trgt_pos.y) < 0.5)
+	if not same_target then
+		nav.path = nil
+		nav.stuck_time = 0
+		nav.stuck_acc = 0
+		nav.prev_self_pos = nil
+		nav.prev_u_trgt_pos = nil
+	end
+
+	nav.active = true
+	nav.target = trgt
+	nav.u_trgt_pos = u_trgt_pos
+	nav.trgt_pos = trgt_pos
+	nav.speed = speed
+	nav.arrive_rule = arrive_rule
+	nav.target_distance = target_distance
+	nav.look_at_target = args.look_at_target
+	nav.original_target_pos = args.original_target_pos
+	nav.force = args.force
+	nav.min_self_move_distance = args.min_self_move_distance or 0.25
+	nav.min_trgt_move_distance = args.min_trgt_move_distance or 0.25
+
+	-- Check if we are done (before any planning)
+	local u_self_pos = self.object:get_pos()
+	if arrive_rule == "cell" then
+		local self_pos = vector.round(u_self_pos)
+		if self_pos.x == trgt_pos.x
+			and self_pos.z == trgt_pos.z
+			and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
+			nav.active = false
+			nav.path = nil
+			npc.nav._stand(self, trgt_pos)
+			nav.last_status = "arrived"
+			return "arrived"
 		end
-		return nil
+	elseif vector.distance(u_self_pos, u_trgt_pos) <= target_distance then
+		nav.active = false
+		nav.path = nil
+		npc.nav._stand(self, trgt_pos)
+		nav.last_status = "arrived"
+		return "arrived"
 	end
 
-	minetest.log("Path: "..dump(path))
-
-	-- Move towards position
-	local next_node = path[1]
-	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z and #path > 1 then
-		next_node = path[2]
+	-- First plan (a re-arm with a usable cached path keeps it)
+	if nav.path == nil or #nav.path == 0 then
+		nav.path = npc.nav._find_path(self, trgt_pos)
+		if nav.path == nil then
+			if nav.force == true then
+				self.object:move_to(trgt_pos, false)
+			end
+			nav.active = false
+			nav.path = nil
+			npc.nav._stand(self, nil)
+			nav.last_status = "failed"
+			return "failed"
+		end
 	end
+
+	nav.last_status = "moving"
+	return "moving"
+end
+
+-- Per-tick driver, called by the low-latency task "npc:move:walk_to".
+-- Returns "arrived" | "failed" | "moving".
+function npc.nav.step(self, dtime)
+	local nav = npc.nav.session(self)
+	if nav.active ~= true or nav.trgt_pos == nil then
+		return "moving"
+	end
+
+	-- Refresh a live target's position
+	if nav.target ~= nil then
+		local p = nav.target:get_pos()
+		if p ~= nil then
+			nav.u_trgt_pos = p
+		end
+	end
+
+	local u_self_pos = self.object:get_pos()
+	local self_pos = vector.round(u_self_pos)
+
+	-- Check if we are done
+	if nav.arrive_rule == "cell" then
+		if self_pos.x == nav.trgt_pos.x
+			and self_pos.z == nav.trgt_pos.z
+			and math.abs(nav.trgt_pos.y - self_pos.y) < 0.5 then
+			nav.active = false
+			nav.path = nil
+			npc.nav._stand(self, nav.trgt_pos)
+			nav.last_status = "arrived"
+			return "arrived"
+		end
+	elseif vector.distance(u_self_pos, nav.u_trgt_pos) <= nav.target_distance then
+		nav.active = false
+		nav.path = nil
+		npc.nav._stand(self, nav.trgt_pos)
+		nav.last_status = "arrived"
+		return "arrived"
+	end
+
+	-- Stuck detection: accumulate how far we moved during the last
+	-- second. If we barely moved while we were supposed to be walking,
+	-- the cached path is considered stale and we re-plan.
+	local is_stuck = false
+	if nav.prev_self_pos ~= nil then
+		local acc_time = (nav.stuck_time or 0) + dtime
+		local acc_moved = (nav.stuck_acc or 0)
+			+ vector.distance(nav.prev_self_pos, u_self_pos)
+		if (acc_time >= 1) then
+			is_stuck = (acc_moved < nav.min_self_move_distance)
+			acc_time = 0
+			acc_moved = 0
+		end
+		nav.stuck_time = acc_time
+		nav.stuck_acc = acc_moved
+	end
+
+	-- Re-plan if the path is gone, we are stuck, the target moved, or
+	-- we reached the first node of the path: the head node is consumed
+	-- by re-planning from the current cell, so the aim is always a step
+	-- ahead of the NPC.
+	local trgt_moved = (nav.prev_u_trgt_pos ~= nil)
+		and (vector.distance(nav.prev_u_trgt_pos, nav.u_trgt_pos) > nav.min_trgt_move_distance)
+	local reached_head = (nav.path ~= nil and #nav.path >= 1)
+		and (nav.path[1].pos.x == self_pos.x and nav.path[1].pos.z == self_pos.z)
+	if (nav.path == nil or #nav.path == 0)
+		or (is_stuck == true)
+		or (trgt_moved == true)
+		or (reached_head == true) then
+		local path = npc.nav._find_path(self, nav.trgt_pos)
+		if path == nil then
+			if nav.force == true then
+				self.object:move_to(nav.trgt_pos, false)
+			end
+			nav.active = false
+			nav.path = nil
+			npc.nav._stand(self, nil)
+			nav.last_status = "failed"
+			return "failed"
+		end
+		nav.path = path
+	end
+
+	-- Move towards position.
+	-- Legacy advancement semantics (kept verbatim for now): the tail of
+	-- the path is consumed every tick and the re-plans above refresh
+	-- the head. Proper head advancement replaces this in the next step.
+	local next_node = nav.path[1]
+	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z and #nav.path > 1 then
+		next_node = nav.path[2]
+		table.remove(nav.path)
+	end
+
+	table.remove(nav.path)
 
 	local next_pos = next_node.pos
 
-	local dir = vector.direction(u_self_pos, next_pos)
-	local yaw = minetest.dir_to_yaw(dir)
-
-	-- Store next target pos for position correction
-	self.data.proc[self.process.current.id]["_prev_trgt_pos"] = next_pos
-	self.data.proc[self.process.current.id]["_prev_trgt_dir"] = dir
+	local dir = vector.normalize(vector.direction(u_self_pos, next_pos))
+	local yaw = 0
+	if nav.look_at_target then
+		yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, nav.u_trgt_pos))
+	else
+		yaw = minetest.dir_to_yaw(dir)
+	end
 
 	-- Rotate towards next node
 	self.object:set_yaw(yaw)
 
-	-- Diagonal movement speed must be increased
-	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
+	-- Direction is already normalized, so speed is constant on any axis
 
 	local next_node_below = minetest.get_node({x=next_pos.x, y=next_pos.y-1, z=next_pos.z})
 
@@ -2272,17 +2490,13 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 
 	if (is_incline and not is_walkable_incline) then
 		-- Jump
-		minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
 		_npc.move.jump(self, {target_pos = next_pos})
 	else
-		local y_speed = -10
-		if (is_walkable_incline == true) then
-			self.data.proc[self.process.current.id]["_do_correct_pos"] = false
-		end
-
-		-- Walk
-		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)
-
+		-- Leave the vertical movement to the physics (gravity and
+		-- stepheight). A large negative y speed made the NPC dive and
+		-- could cancel stair/slab climbing.
+		local y_speed = self.object:get_velocity().y
+		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, nav.speed)
 		self.object:set_velocity(vel)
 		_npc.model.set_animation(self, {name = "walk", speed = 30})
 	end
@@ -2290,21 +2504,83 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	-- If openable, check the state. If it's open, NPC will close. If it's closed,
 	-- NPC will open and close.
 	if next_node.type == npc.pathfinder.node_types.openable then
-
 		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
 		if (is_open ~= nil) then
 			if (is_open == true) then
-				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
+				minetest.after(1, function()
+					-- Guard against the entity being gone by the time
+					-- the retry fires.
+					if not self.object:is_gone() then
+						_npc.env.node_operate(self, {pos=next_pos})
+					end
+				end)
 			elseif (is_open == false) then
 				_npc.env.node_operate(self, {pos=next_pos})
-				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
+				minetest.after(1, function()
+					-- Guard against the entity being gone by the time
+					-- the retry fires.
+					if not self.object:is_gone() then
+						_npc.env.node_operate(self, {pos=next_pos})
+					end
+				end)
 			end
 		end
-
 	end
 
-    return false
+	nav.prev_self_pos = self.object:get_pos()
+	nav.prev_u_trgt_pos = nav.u_trgt_pos
 
+	nav.last_status = "moving"
+	return "moving"
+end
+
+-- Stop an active navigation session (the NPC stands down).
+function npc.nav.stop(self)
+	local nav = npc.nav.session(self)
+	if nav.active == true then
+		self.object:set_velocity({x = 0, y = 0, z = 0})
+		_npc.model.set_animation(self, {name = "stand"})
+	end
+	nav.active = false
+	nav.path = nil
+end
+
+-- Current session status: "moving" while the session is active,
+-- otherwise the last terminal status ("arrived" | "failed") or nil.
+function npc.nav.status(self)
+	local nav = npc.nav.session(self)
+	if nav.active == true then
+		return "moving"
+	end
+	return nav.last_status
+end
+
+-- Walk instruction using pathfinding
+-- Supports climbing stairs/slabs, jumping and opening doors (the
+-- per-tick work lives in the npc.nav section above).
+npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
+	local speed = args.speed or 2
+
+	-- Calculate process timer interval: re-arm more frequently while
+	-- the NPC is moving. Restored when the walk finishes or fails.
+	local prev_proc_int = self.timers.proc_int
+	self.timers.proc_int = (1/speed) / 2
+
+	local status = npc.nav.start(self, args, {speed = speed, arrive_rule = "cell"})
+	if status == "moving" then
+		-- The low-latency task drives the per-tick movement
+		self.timers.hl_task_int = 30
+		npc.proc.execute_ll_task(self, "npc:move:walk_to", args)
+		return false
+	end
+
+	-- Restore process timer interval
+	self.timers.proc_int = prev_proc_int
+	if status == "arrived" then
+		return true
+	end
+
+	return nil
 end)
 
 
@@ -2351,7 +2627,9 @@ end
 
 npc.proc.enqueue_program = function(self, name, args)
 
-	self.process.queue_tail = self.process.queue_tail + 1
+	local next_tail = (self.process.queue_tail + 1) % 100
+	if next_tail == 0 then next_tail = 1 end
+	self.process.queue_tail = next_tail
 	self.process.queue[self.process.queue_tail] = {
 		id = self.process.key,
 		name = name,
@@ -2448,7 +2726,26 @@ npc.proc.execute_ll_task = function(self, name, args)
 
 	-- If we have a current LL task running, put it into the stack
 	if self.process.low_latency_task.active == true then
-		table.insert(self.process.low_latency_task_stack, 1, {name = self.process.low_latency_task.name, args = self.process.low_latency_task.args})
+		if self.process.low_latency_task.name == name then
+			-- Re-arming an already active task: refresh its arguments in
+			-- place (e.g. npc:follow updating the target) and restart the
+			-- timeout countdown.
+			self.process.low_latency_task.args = args
+			self.timers.hl_task_value = 0
+			return
+		end
+
+		-- Avoid stacking a task that is already waiting on the stack
+		local is_on_stack = false
+		for i = 1, #self.process.low_latency_task_stack do
+			if self.process.low_latency_task_stack[i].name == name then
+				is_on_stack = true
+				break
+			end
+		end
+		if not is_on_stack then
+			table.insert(self.process.low_latency_task_stack, 1, {name = self.process.low_latency_task.name, args = self.process.low_latency_task.args})
+		end
 	end
 
 	self.process.low_latency_task.name = name
@@ -2517,7 +2814,10 @@ end
 -- Lua Entity Callbacks															 --
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
-npc.do_step = function(self, dtime)
+npc.do_step = function(self, dtime, moveresult)
+	-- Keep the latest moveresult around so that low-latency tasks (e.g. the
+	-- jump landing check) can inspect the collision info of this step.
+	self.moveresult = moveresult
 	
 	-- Support for debug
 	if self.debug and self.debug.pause then
@@ -2533,13 +2833,19 @@ npc.do_step = function(self, dtime)
 	self.timers.proc_value = self.timers.proc_value + dtime
 	
 	-- Check node below NPC
-	if (self.timers.node_below_value > self.timers.node_below_value) then
+	if (self.timers.node_below_value > self.timers.node_below_int) then
+		self.timers.node_below_value = 0
 		local current_pos = self.object:get_pos()
-		self.data.env.node_on = minetest.get_node_or_nil({x=current_pos.x, y=current_pos.y-1, z=current_pos.z})
+		-- The supporting node is the row containing the NPC's feet:
+		-- this engine build rests min.y=0 collision boxes 0.5 sunk
+		-- into their supporting node, so the feet y already floors
+		-- to that node row (no -1 offset).
+		self.data.env.node_on = minetest.get_node_or_nil({x=current_pos.x, y=current_pos.y, z=current_pos.z})
 	end
 
 	-- Get objects around NPC on radius
 	if (self.timers.objects_value > self.timers.objects_int) then
+		self.timers.objects_value = 0
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
 
@@ -2579,20 +2885,13 @@ npc.do_step = function(self, dtime)
 			
 			-- Check if we have a low latency task on the stack
 			-- and run it if we do
-			minetest.log("This is the stack!"..dump(self.process.low_latency_task_stack))
 			if #self.process.low_latency_task_stack > 0 then
-				minetest.log("Before pop: "..dump(#self.process.low_latency_task_stack))
 				local top = self.process.low_latency_task_stack[1]
-				minetest.log("Now executing task: "..dump(name))
 				npc.proc.execute_ll_task(self, top.name, top.args)
 				table.remove(self.process.low_latency_task_stack)
-				minetest.log("After pop: "..dump(#self.process.low_latency_task_stack))
 				-- Avoid execution of the process queue
 				return
 			end
-		else
-			-- Avoid execution of the process queue
-			return
 		end
 
 	end
@@ -2714,14 +3013,17 @@ npc.do_step = function(self, dtime)
 
 		--minetest.log("Process now: "..dump(self.process))
 
-		-- Execute next instruction, if available
-		if self.process.current.instruction > -1 then
+		-- Execute next instruction, if available. While a low-latency
+		-- task is still active (e.g. the jump landing wait), do not run
+		-- the next instruction: the NPC must land before the program
+		-- proceeds to the following instruction.
+		if self.process.current.instruction > -1 and self.process.low_latency_task.active ~= true then
 			local instruction =
 				program_table[self.process.current.name].instructions[self.process.current.instruction]
 			-- Check if there are no more instructions. This happens usually when the last instruction
 			-- of a program is "npc:execute".
 			if instruction == nil then
-				minetest.log("Process now: "..dump(self.process))
+				--minetest.log("Process now: "..dump(self.process))
 				return
 			end
 			
@@ -2815,6 +3117,7 @@ npc.on_activate = function(self, staticdata)
 			global = {},
 			proc = {},
 			temp = {},
+			nav = {},
 			schedule = {}
 		}
 		
@@ -2848,13 +3151,21 @@ npc.get_staticdata = function(self)
 
 	if self.process then
 		self.process.low_latency_task_stack = {}
-		self.process.low_latency_task = {}
+		self.process.low_latency_task = {
+			handler = nil,
+			timeout_handler = nil,
+			args = {},
+			active = false
+		}
 		result = result..minetest.serialize(self.process).."|"
 	end
 
 	if self.data then
 		self.data.env.objects = {}
 		self.data.temp = {}
+		-- The navigation session holds live object references (and a
+		-- cached path), which are not serializable - drop it.
+		self.data.nav = {}
 		result = result..minetest.serialize(self.data).."|"
 	end
 	
@@ -2936,174 +3247,37 @@ npc.proc.register_program("builtin:idle", {
 -----------------------------------------------------------------------------------
 
 npc.proc.register_low_latency_task("npc:move:jump", function(self, dtime, args)
-	local vel = self.object:get_velocity()
-	if (vel.y == 0) then
+	-- Landed if we collided with the ground on this step (moveresult is
+	-- only true on the tick where the collision happens), or if the
+	-- collision handling has already zeroed the y velocity.
+	local landed = (self.moveresult ~= nil and self.moveresult.touching_ground == true)
+	if landed == false and self.object:get_velocity().y == 0 then
+		landed = true
+	end
+	if landed then
 		self.object:set_velocity({x=0, y=0, z=0})
-		-- Landed
 		return true
 	end
 	-- Not landed yet
 	return false
 end)
 
--- TODO: This needs to be optimized as much as possible!
--- 1. Consider what is our target.
---    a. If node, calculate path once, then use it
---    b. If object, move toward it
--- 2. On both instances, always save our previous position
--- 3. If we have been stuck for 2-3 turns (configurable!), then use pathfinder
 -- Walk instruction using pathfinding and low-latency tasks
 -- This is a possibly expensive operation!
 -- Supports climbing stairs/slabs, jumping and opening doors
+-- The per-tick work (planning, node advancement, aiming, stairs,
+-- jumps, doors, arrival and stuck handling) lives in the shared
+-- navigation session - see the npc.nav section above.
 npc.proc.register_low_latency_task("npc:move:walk_to", function(self, dtime, args)
-	local result = false
-	local u_self_pos = self.object:get_pos()
-	local self_pos = vector.round(u_self_pos)
-
-	--minetest.log("Args: "..dump(args))
-
-	local u_trgt_pos = nil
-	if args.target then
-		u_trgt_pos = args.target:get_pos() 
-	elseif args.target_pos then
-		u_trgt_pos = args.target_pos
-	else
-		-- Cannot find a target to walk to
-		return false
-	end
-
-	local trgt_pos = vector.round(u_trgt_pos)
-	local speed = args.speed or 3
-	local trgt_distance = args.target_distance or 1.5
-	
-	local look_at_trgt = args.look_at_target
-
-	local path = self.data.temp["_npc_walk_to_ll_path"]
-	local self_prev_pos = self.data.temp["_npc_walk_to_ll_self_prev_pos"]
-	local trgt_prev_pos = self.data.temp["_npc_walk_to_ll_trgt_prev_pos"]
-	local min_self_move_distance = args.min_self_move_distance or 0.25
-	local min_trgt_move_distance = args.min_self_move_distance or 0.25
-
-	if args.check_end_pos_walkable == true and not args.target then
-		trgt_pos = _npc.env.node_get_accessing_pos(self, trgt_pos)
-	end
-
-	-- Check if we are done
-	local distance = vector.distance(u_self_pos, u_trgt_pos)
-	--minetest.log("Distance: "..dump(distance))
-	if distance <= trgt_distance then
-		self.object:set_velocity({x = 0, y = 0, z = 0})
-		-- TODO: Check if animation exists?
-		_npc.model.set_animation(self, {name = "stand"})
-		return true
-	end
-
-
-	minetest.log("No path: "..dump(path == nil or #path == 0))
-
-	if (path == nil or #path == 0)
-		--or (self_prev_pos ~= nil and vector.distance(self_prev_pos, u_self_pos) < min_self_move_distance)
-		or (trgt_prev_pos ~= nil and vector.distance(trgt_prev_pos, u_trgt_pos) > min_trgt_move_distance) then
-			--minetest.log("Using pathfinder...")
-			self.object:set_properties({stepheight = 1})
-			path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
-			self.object:set_properties({stepheight = 0.6})
-			if not path then
-				if args.force == true then
-					self.object:move_to(trgt_pos, false)
-				end
-
-				-- Stop NPC
-				self.object:set_velocity({x = 0, y = 0, z = 0})
-				-- TODO: Check if animation exists?
-				_npc.model.set_animation(self, {name = "stand"})
-				return true
-			end	
-		end
-
-	-- Move towards position
-	local next_node = path[1]
-	if next_node.pos.x == self_pos.x and next_node.pos.z == self_pos.z and #path > 1 then
-		next_node = path[2]
-		table.remove(path)
-	end
-
-	table.remove(path)
-	self.data.temp["_npc_walk_to_ll_path"] = path
-
-	local next_pos = next_node.pos
-
-	local dir = vector.direction(u_self_pos, next_pos)
-	local yaw = 0
-	if look_at_trgt then
-		yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, u_trgt_pos))
-	else
-		yaw = minetest.dir_to_yaw(dir)
-	end
-
-	-- Rotate towards next node
-	self.object:set_yaw(yaw)
-
-	-- Diagonal movement speed must be increased
-	if (dir.x ~= 0 and dir.z ~= 0) then speed = speed * math.sqrt(2) end
-
-	local next_node_below = minetest.get_node({x=next_pos.x, y=next_pos.y-1, z=next_pos.z})
-
-	-- Small hack: avoid jumping if we are looking at stairs or slabs.
-	-- TODO: Make it better. Maybe, from the NPC's stepheight, create
-	-- a raycast in a 45 grade incline. If the raycast doesn't inersects
-	-- anything, we can walk the incline. Otherwise, we jump.
-	local is_incline = false
-	local is_walkable_incline = false
-	if (next_pos.y >= u_self_pos.y + 1) then
-		is_incline = true
-		if (minetest.get_item_group(next_node_below.name, "stair") > 0
-			or minetest.get_item_group(next_node_below.name, "slab") > 0) then
-			is_walkable_incline = true
-		end
-	end
-
-	if (is_incline and not is_walkable_incline) then
-		-- Jump
-		--minetest.log("Jumping to "..minetest.pos_to_string(next_pos))
-		_npc.move.jump(self, {target_pos = next_pos})
-	else
-		local y_speed = self.object:get_velocity().y
-		--minetest.log("Walking to "..dump(minetest.pos_to_string(dir)))
-
-		-- Walk
-		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, speed)
-
-		self.object:set_velocity(vel)
-		_npc.model.set_animation(self, {name = "walk", speed = 30})
-	end
-
-	-- If openable, check the state. If it's open, NPC will close. If it's closed,
-	-- NPC will open and close.
-	if next_node.type == npc.pathfinder.node_types.openable then
-
-		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
-		if (is_open ~= nil) then
-			if (is_open == true) then
-				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
-			elseif (is_open == false) then
-				_npc.env.node_operate(self, {pos=next_pos})
-				minetest.after(1, _npc.env.node_operate, self, {pos=next_pos})
-			end
-		end
-
-	end
-
-	self.data.temp["_npc_walk_to_ll_prev_self_pos"] = self.object:get_pos()
-	if args.target then self.data.temp["_npc_walk_to_ll_prev_trgt_pos"] = args.target:get_pos() end
-
-    return false
-
+	return npc.nav.step(self, dtime) ~= "moving"
 end)
 
 npc.proc.register_instruction("npc:move:walk_to_pos_ll", function(self, args)
-	self.timers.hl_task_int = 30
-	npc.proc.execute_ll_task(self, "npc:move:walk_to", args)
+	local status = npc.nav.start(self, args, {speed = 3, arrive_rule = "distance", target_distance = 1.5})
+	if status == "moving" then
+		self.timers.hl_task_int = 30
+		npc.proc.execute_ll_task(self, "npc:move:walk_to", args)
+	end
 end)
 
 ---------------------------------------------------------------------

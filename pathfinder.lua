@@ -389,11 +389,22 @@ function pathfinder.find_path(pos, endpos, entity)
 				end
 			end
 		end
-		if count > 100 then
+		if count > 2000 then
 			-- print("fail")
+			-- Cap was 100. The openSet accumulates off-band nodes that A*
+			-- never expands while optimal-band nodes exist, so 100 killed
+			-- diagonal paths beyond ~22 steps (and straight beyond ~45 m).
+			-- 2000 allows ~500-step paths on flat open ground.
 			return
 		end
 	until count < 1
 	-- print("count < 1")
-	return {pos}
+	-- No reachable ground level: report failure (nil), not a fake
+	-- 1-node "path" to the start cell. A non-nil result looks like a
+	-- successful path: the nav session treats its head as reached and
+	-- re-plans every tick (per-tick A* exhaustion) while the walk
+	-- instruction re-arms forever, so the state program never resumes.
+	-- nil makes the wrapper log "Couldn't find path" and nav.start fail
+	-- cleanly, which breaks the program so the state process rescans.
+	return nil
 end

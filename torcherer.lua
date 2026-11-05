@@ -95,12 +95,17 @@ minetest.register_craftitem("anpc:torcherer_spawner", {
 	description = "Torcherer Spawner",
 	inventory_image = "default_torch_on_floor.png",
 	on_use = function(itemstack, user, pointed_thing)
+		if not pointed_thing or not pointed_thing.under then
+			minetest.log("anpc:torcherer_spawner: no valid pointed position, ignoring use")
+			return itemstack
+		end
 		local spawn_pos = minetest.pointed_thing_to_face_pos(user, pointed_thing)
 		spawn_pos.y = spawn_pos.y
 		local entity = minetest.add_entity(spawn_pos, "anpc:torcherer_npc")
 		if entity then
             npc.proc.execute_program(entity:get_luaentity(), "torcherer:init")
             npc.proc.execute_program(entity:get_luaentity(), "torcherer:find_bed")
+			minetest.log(dump(entity:get_luaentity()))
 			npc.proc.set_state_process(entity:get_luaentity(), "torcherer:idle", {
 				ack_nearby_objs = true,
 				ack_nearby_objs_dist = 4,
@@ -120,6 +125,9 @@ minetest.register_entity("anpc:torcherer_npc", {
 		"default_male.png",
 	},
 	visual_size = {x = 1, y = 1, z = 1},
+	-- This engine build rests the collision box 0.5 sunk into the
+	-- supporting node; lift the model back to the node top.
+	visual_offset = {x = 0, y = 0.5, z = 0},
 	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
 	stepheight = 0.6,
 	physical = true,

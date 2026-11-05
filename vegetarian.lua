@@ -278,6 +278,9 @@ minetest.register_entity("anpc:vegetarian_npc", {
 		"default_male.png",
 	},
 	visual_size = {x = 1, y = 1, z = 1},
+	-- This engine build rests the collision box 0.5 sunk into the
+	-- supporting node; lift the model back to the node top.
+	visual_offset = {x = 0, y = 0.5, z = 0},
 	collisionbox = {-0.20,0,-0.20, 0.20,1.8,0.20},
 	stepheight = 0.6,
 	physical = true,
