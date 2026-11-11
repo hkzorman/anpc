@@ -6,7 +6,8 @@ local _npc = {
 	env   = {},
 	obj	  = {},
 	move  = {},
-	model = {}
+	model = {},
+	follow_speed_logged = false
 }
 
 npc.model = _npc.model
@@ -1296,12 +1297,31 @@ _npc.env.node_get_accessing_pos = function(self, args)
 	local self_pos = vector.round(self.object:get_pos())
 	if (pos.y > self_pos.y and (pos.y - self_pos.y) > vertical_reach) then
 		return args.pos
-	else
-		-- Adjust the position's y for the pathfinder
-		pos.y = self_pos.y
 	end
-
+	-- The accessing node must be at the same height as the target node; only
+	-- if there is no node to stand at that height do we fall back to one block
+	-- below or above the target. It must not be flattened to the NPC's own y,
+	-- which put path targets at the NPC's level for goals above the current floor.
 	local target_node = minetest.get_node_or_nil(pos)
+	if (target_node == nil
+		or npc.pathfinder.is_good_node(target_node, {}) == npc.pathfinder.node_types.walkable) then
+		-- No node to stand at the target height: fall back to the closest
+		-- level below or above the target within reach.
+		local fallback_y = pos.y - 1
+		while (fallback_y <= pos.y + 1) do
+			local fallback_node = minetest.get_node_or_nil(
+				{x = pos.x, y = fallback_y, z = pos.z})
+			if (fallback_node ~= nil
+				and npc.pathfinder.is_good_node(fallback_node, {}) == npc.pathfinder.node_types.walkable) then
+				pos.y = fallback_y
+				break
+			end
+			fallback_y = fallback_y + 1
+		end
+	end
+	-- Re-resolve the target node at the (possibly fallback-adjusted) height.
+	target_node = minetest.get_node_or_nil(pos)
+
 	if (target_node) then
 		if npc.pathfinder.is_good_node(target_node, {})
 			== npc.pathfinder.node_types.non_walkable or args.force == true then
@@ -1360,8 +1380,10 @@ _npc.env.node_get_accessing_pos = function(self, args)
 						min_distance = dist
 						closest_pos = cpos
 					end
+				end
 
-					if search_method == "prefer_first" then
+				if search_method == "prefer_first" then
+					if passable then
 						minetest.log("Returning this accessing pos: "..minetest.pos_to_string(cpos))
 						return cpos
 					end
@@ -1784,12 +1806,22 @@ _npc.model.set_animation = function(self, args)
     )
 
     if ((args.animation_after or animation.animation_after) and loop == false) then
+    	-- The entity may be gone by the time this fires (removed,
+    	-- killed, or dormant). s.object is never nil - it stays a
+    	-- userdata - and this build has no ObjectRef:is_gone() at
+    	-- all, so calling it crashed the server (async error ->
+    	-- shutdown). get_luaentity() never errors and returns nil
+    	-- on a gone reference, so use it as the liveness check.
     	minetest.after(
     		(animation.end_frame - animation.start_frame) / animation.speed,
-    		_npc.model.set_animation,
-    		self, {
-    			name = args.animation_after or animation.animation_after
-    		})
+    		function(s)
+    			if s.object ~= nil and s.object:get_luaentity() ~= nil then
+    				_npc.model.set_animation(s, {
+    					name = args.animation_after or animation.animation_after
+    				})
+    			end
+    		end,
+    		self)
     end
 
     return true
@@ -2026,8 +2058,25 @@ _npc.move.jump = function(self, args)
 	--local cardinal_dir = args.cardinal_dir
 	local range = args.range or 1 -- horizontal distance the NPC will move on jump
 	local speed = args.speed or 1
+	local middle = args.middle == true
 
-	local self_pos = vector.round(self.object:get_pos())
+	local u_self_pos = self.object:get_pos()
+	local self_pos = vector.round(u_self_pos)
+	-- Block-middle mode: jump to the middle of the target block. The
+	-- target middle sits at the engine's rest height (cell y - 0.5).
+	-- The arc's takeoff is the NPC's actual position (no x/z snap):
+	-- the flight displacement is exactly (target middle - takeoff),
+	-- so the landing hits the target middle by construction no matter
+	-- where in the current cell the jump starts. That makes the jump
+	-- self-healing: an offset from the block middle at takeoff is
+	-- cancelled by the flight instead of being carried into the
+	-- landing (where, e.g. in a 1-node-wide clearance, it would push
+	-- the body into the side columns), and any lag/precision loss in
+	-- the takeoff position is absorbed the same way.
+	if middle then
+		self_pos = {x = u_self_pos.x, y = u_self_pos.y, z = u_self_pos.z}
+		trgt_pos = {x = trgt_pos.x, y = trgt_pos.y - 0.5, z = trgt_pos.z}
+	end
 	local dir = vector.normalize(vector.direction(self_pos, trgt_pos))
 
 	-- Pick the arc from the vertical difference between the target
@@ -2076,7 +2125,17 @@ _npc.move.jump = function(self, args)
 	-- distance during the expected airtime.
 	local x_speed = speed
 	if (y_speed > 0) then
+		-- Symmetric full-flight airtime (launch and landing at the
+		-- same height). Exact for same-level jumps.
 		local airtime = 2 * y_speed / 10
+		if (next_y_diff == 1 and middle == true) then
+			-- Block-middle to block-middle: the minimal arc peaks at
+			-- the target surface top (rise = dy + 0.5 puts the apex
+			-- 0.5 above the landing rest height), so the flight is the
+			-- climb to the apex plus a 0.5 m fall - shorter than the
+			-- symmetric airtime, which lands the NPC short.
+			airtime = y_speed / 10 + math.sqrt(2 * 0.5 / 10)
+		end
 		x_speed = travel / airtime
 		-- Give the landing task a generous timeout so that a jump is
 		-- never cut off mid-air.
@@ -2085,7 +2144,75 @@ _npc.move.jump = function(self, args)
 		self.timers.hl_task_int = 1.5
 	end
 
-	local vel = {x=dir.x * x_speed, y=y_speed, z=dir.z * x_speed}
+	-- Stuck-jump escape: remember the horizontal spot the previous jump
+	-- took off from. If the NPC keeps launching from (within one node of)
+	-- the same spot - a jump that makes no x/z progress, as when the NPC
+	-- takes off right up against the step face it must clear (x/z ~ +0.8
+	-- into the cell) - the arc is raised after a few repeats so the body
+	-- gets the height it needs to go over the face. Each repeated failure
+	-- raises the arc one more step: +0.5, then +1.0, and so on, capped at
+	-- +3.0. Only the vertical speed is boosted: a higher arc stays in the
+	-- air longer, so the horizontal speed is re-derived from the longer
+	-- flight time, which keeps the landing on the target (middle) instead
+	-- of overshooting it. An additive horizontal boost is the wrong
+	-- direction here: it reaches the face sooner and lower (less time in
+	-- the air before the face), exactly when the takeoff is already
+	-- offset toward it. The state lives in the nav session, so any real
+	-- movement (and save/load) resets it.
+	local stuck_limit = 3
+	local stuck_boost_step = 0.5
+	local stuck_boost_max = 3.0
+	local nav = npc.nav.session(self)
+	local moved = (nav.stuck_x ~= nil)
+		and (math.abs(u_self_pos.x - nav.stuck_x) >= 1
+			or math.abs(u_self_pos.z - nav.stuck_z) >= 1)
+	if moved then
+		nav.stuck_n = 0
+	else
+		nav.stuck_n = (nav.stuck_n or 0) + 1
+	end
+	nav.stuck_x = u_self_pos.x
+	nav.stuck_z = u_self_pos.z
+	if (nav.stuck_n >= stuck_limit) then
+		local levels = nav.stuck_n - stuck_limit + 1
+		local boost = math.min(levels * stuck_boost_step, stuck_boost_max)
+		y_speed = y_speed + boost
+		-- Re-aim the raised arc: solve the ballistic flight time to the
+		-- target height (y(t) = dy, the later root, i.e. after the apex)
+		-- so x_speed carries the body the exact horizontal travel in that
+		-- time. Unboosted this equals the arc's existing airtime (the
+		-- middle step-up's asymmetric 0.5 m fall included), so only
+		-- boosted arcs change; the landing still hits the target middle
+		-- despite the longer flight.
+		local dy = trgt_pos.y - self_pos.y
+		local disc = y_speed * y_speed - 20 * dy
+		if (disc < 0) then disc = 0 end
+		local airtime = (y_speed + math.sqrt(disc)) / 10
+		x_speed = travel / airtime
+		self.timers.hl_task_int = airtime * 2 + 0.5
+		minetest.log(string.format(
+			"[anpc] %s stuck-jump %d: no x/z progress, raising arc +%.1f (y=%.2f, x=%.2f)",
+			tostring(self.npc_id), nav.stuck_n, boost, y_speed, x_speed))
+	end
+	-- `dir` is the normalized 3D direction, which carries a vertical
+	-- component whenever the target sits above the NPC (always the case
+	-- for a step-up). The horizontal speed must be applied along the pure
+	-- horizontal direction, otherwise the vertical component dilutes it
+	-- and the NPC undershoots the step top (e.g. an adjacent 1-block
+	-- step gets ~29% less horizontal speed) and lands short of the jump.
+	local horiz_len = math.sqrt(dir.x * dir.x + dir.z * dir.z)
+	local horiz_x = (horiz_len > 0) and (dir.x / horiz_len) or 0
+	local horiz_z = (horiz_len > 0) and (dir.z / horiz_len) or 0
+	local vel = {x = horiz_x * x_speed, y = y_speed, z = horiz_z * x_speed}
+	-- The engine resolves entity collision per axis: while the box's
+	-- lower half still overlaps the step face (feet below the face top),
+	-- any x/z motion against the face is pushed back and the velocity
+	-- component of that axis is zeroed - leaving the arc purely
+	-- vertical, a jump that clears the block's height but never crosses
+	-- its face. Stash the horizontal launch so the landing task can
+	-- re-assert it every tick until the body clears the face.
+	self.jump_xvel = vel.x
+	self.jump_zvel = vel.z
 	self.object:set_velocity(vel)
 	npc.proc.execute_ll_task(self, "npc:move:jump")
 
@@ -2213,14 +2340,43 @@ end)
 -- Entry points (thin wrappers around this section):
 --   npc:move:walk_to_pos     proc, cell arrival, speed 2
 --   npc:move:walk_to_pos_ll  proc -> ll task, distance arrival, speed 3
+--   npc:move:walk_to_cell_ll proc -> ll task, cell arrival, speed 5,
+--                            block-middle; for the npc:follow goal
+--                            cell (re-tracked per tick by npc.nav:
+--                            follow_track), the arrival rests the NPC
+--                            on the goal cell middle
+--
+-- Block-middle walking (middle = true): the target, the per-tick aim
+-- and the jump arc use the middle of each block (cell y - 0.5, the
+-- engine's rest height), so the NPC moves from block middle to block
+-- middle - on the ground, over 1-block steps and diagonals (at
+-- constant speed). The pos entry points keep the legacy cell-corner
+-- behavior by default (their callers track live coordinates, e.g. a
+-- moving player); the cell ll entry point has middle on because its
+-- goal is a static cell and the arrival must rest on the cell middle.
+--
+-- Door closing (door_close arg on the walk instructions): after the
+-- NPC passes through an openable node (a door it opened, or one that
+-- was already open) the door is closed according to the policy
+-- (default "immediate"):
+--   "immediate": the tick the NPC's center crosses into the next
+--     cell - no timer, no backtracking.
+--   "pause": the NPC walks on to the middle of the next cell, stops,
+--     faces the door, closes it and holds for a short beat before
+--     resuming the walk.
+--   "none": the door is left open.
+-- The pause is a plain tick counter (nav.door_hold) inside the
+-- existing per-tick driver: no minetest.after timers and no liveness
+-- guards to maintain.
 --
 -- Both entry points are driven per-tick by the low-latency task
 -- "npc:move:walk_to" (npc.nav.step).
 --
 -- A session is (re)armed with npc.nav.start(). Re-arming with the
 -- same target cell keeps the cached path and the stuck accumulators
--- (npc:follow re-arms every 0.25 s and must not reset the 1 s stuck
--- window); a different target cell resets them.
+-- (npc:follow re-arms every 0.05 s while the leader stands still and
+-- must not reset the 1 s stuck window); a different target cell
+-- resets them.
 
 npc.nav = {}
 
@@ -2248,6 +2404,667 @@ function npc.nav._find_path(self, trgt_pos)
 	return path
 end
 
+-- Axis-wise sign (-1, 0, 1); math.sign is not available here.
+local function sign(v)
+	if v < 0 then return -1 end
+	if v > 0 then return 1 end
+	return 0
+end
+
+-- Continuous follow (npc:follow): the goal cell is picked from the
+-- live leader and re-tracked while the walk is active.
+--
+-- Goal = the first standable slot candidate (npc.nav._follow_slots)
+-- for the leader's *predicted* cell: the live leader position plus a
+-- predictive lead along the leader's velocity (npc.nav:
+-- _follow_predict), so the goal anticipates the leader's next cell
+-- instead of chasing the cell it just left. Slot order: the mode's
+-- primary slot (behind/ahead per the leader's travel direction), the
+-- opposite slot, then the four cardinal slots at the follow
+-- distance. The leader's cell change and direction bookkeeping live
+-- on the nav session (follow_prev_cell / follow_last_dir), so while
+-- the leader stands still the goal is stable and the follower keeps
+-- the slot it already occupies.
+--
+-- The leader is resolved by name (npc.nav.follow_leader): players
+-- first (no range limit - the nearby-object set's view_range would
+-- otherwise drop the leader), then the tracked nearby objects (an
+-- NPC leader).
+--
+-- Per-tick tracking (npc.nav.follow_track, called from npc.nav.step
+-- while the ll walk task is active): a leader position read and a
+-- predicted-cell compare per tick; the slot node reads and the A*
+-- run only when the leader's predicted cell actually changes (goal
+-- cache: follow.pred_cell / follow.cached_goal, set in _follow_slot
+-- and gated on in npc.nav.follow_goal / follow_next_leg). When the
+-- goal cell changes: the remaining path is truncated if it already
+-- passes the new cell (free), otherwise a full re-plan (the same
+-- small A* the reached_head re-plan uses). If the goal cell is
+-- unreachable, npc.nav.follow_fallback tries the remaining
+-- slot-ladder candidates and, when every cell is unreachable, steers
+-- the NPC directly at the goal cell (nav.steer). A steer that shoves
+-- into a wall (or the leader) for a full second without moving drops
+-- into the steer-stuck hold (nav.steer_stuck): the NPC stands still
+-- while a rate-limited re-plan re-engages a path as soon as one
+-- opens, and the hold lifts when the leader's predicted cell
+-- changes. It never gives up on a live leader.
+--
+-- Cost: every follow plan site (follow_track, follow_fallback,
+-- follow_next_leg, the steer retry and the steer-stuck hold in
+-- npc.nav.step) plans through npc.nav._follow_plan, which shares one
+-- 0.5 s failure cooldown, so an unreachable goal costs at most one
+-- real A* per 0.5 s (a failed A* expands up to the pathfinder's
+-- 2000-node cap); under an active cooldown the plans skip for free
+-- and the steer retry keeps the NPC moving toward the goal (the
+-- steer-stuck hold keeps it standing still).
+--
+-- Legs chain at arrival (npc.nav.follow_next_leg): when the NPC
+-- reaches a goal cell's middle, the next leg starts on the same tick
+-- if the goal moved, so there is no dead time between legs. A stale
+-- follow session (the state process swapped away from npc:follow
+-- mid-leg, e.g. the follow item toggled off) is dropped by
+-- follow_track so a later walk is not hijacked.
+--
+-- The follow session (nav.follow) holds the leader ref, the mode,
+-- the distance, the lead time, the derived default and catch-up
+-- speeds (the leader's walk speed minus/plus 0.25 m/s, from the
+-- engine setting movement_speed_walk), the catch-up distance
+-- (default 2 x the follow distance, the gap band the follower uses
+-- to resume walks and to switch between the two speeds, see
+-- npc.nav.follow_speed) and the predicted-cell cache.
+-- get_staticdata drops the whole nav session (it holds a live object
+-- ref), so the session re-initializes from the program args on the
+-- next pass after dormancy.
+
+-- Engine walk-speed probe (settings): the follow default speed is
+-- derived from `movement_speed_walk` at follow start; log the
+-- effective base value once at load so it is visible in the server
+-- log without a field test (there is no per-player walk-speed
+-- getter in this API - the setting plus the per-player physics
+-- overrides are the source of truth).
+do
+	local ws
+	if minetest.settings ~= nil and minetest.settings.get ~= nil then
+		ws = minetest.settings:get("movement_speed_walk")
+	end
+	minetest.log(string.format(
+		"[anpc] engine movement_speed_walk = %s", tostring(ws)))
+end
+
+-- Resolve the follow leader by name. Players first (no range limit),
+-- then the tracked nearby objects (an NPC leader). Returns an
+-- ObjectRef or nil.
+function npc.nav.follow_leader(self, name)
+	if type(name) ~= "string" or name == "" then
+		return nil
+	end
+	local leader = minetest.get_player_by_name(name)
+	if leader ~= nil and leader:get_pos() ~= nil then
+		return leader
+	end
+	local objects = self.data.env.objects
+	for i = 1, #objects do
+		local o = objects[i]
+		if o ~= nil and o.get_name ~= nil and o:get_name() == name then
+			return o
+		end
+	end
+	return nil
+end
+
+-- The leader's predicted position: live position plus a predictive
+-- lead along the leader's velocity (follow.lead seconds, default
+-- 0), so a positive lead makes the goal cell anticipate where the
+-- leader is going. Zero lead (or a missing velocity) returns the
+-- live position.
+function npc.nav._follow_predict(self, leader_pos)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	local lead = follow.lead or 0
+	if lead <= 0 then
+		return leader_pos
+	end
+	local vel = follow.leader ~= nil and follow.leader:get_velocity() or nil
+	if vel == nil then
+		return leader_pos
+	end
+	return {x = leader_pos.x + vel.x * lead, y = leader_pos.y + vel.y * lead,
+		z = leader_pos.z + vel.z * lead}
+end
+
+-- Rate-limited follow A*: every follow plan site (npc.nav:
+-- follow_track, follow_fallback, follow_next_leg, the steer retry in
+-- npc.nav.step) shares one failure cooldown (nav.follow_fail_cd, a
+-- per-tick countdown decremented by npc.nav.follow_track - this
+-- build has no wall clock API), so an unreachable goal costs at most
+-- one real A* per 0.5 s (a failed A* expands up to the pathfinder's
+-- 2000-node cap). Returns the path (a plan ran and succeeded),
+-- "skip" (too soon after a failed plan: the caller treats it as a
+-- failure without planning) or nil (a plan ran and failed - the
+-- cooldown is re-armed).
+function npc.nav._follow_plan(self, trgt_pos)
+	local nav = npc.nav.session(self)
+	if (nav.follow_fail_cd or 0) > 0 then
+		return "skip"
+	end
+	local path = npc.nav._find_path(self, trgt_pos)
+	if path == nil then
+		nav.follow_fail_cd = 0.5
+	end
+	return path
+end
+
+-- The ordered follow slot candidates for a leader cell (see the
+-- section header): the mode's primary slot, the opposite slot, and
+-- the four cardinal slots at the follow distance. `d` is the
+-- leader's travel direction; when `seed` is true (first follow, no
+-- direction on record) d is the follower's side of the leader and
+-- the primary is the follower's own side whatever the mode.
+-- Unstandable cells are dropped (a dropped primary falls through to
+-- the next candidate), so entry 1 is always a cell the NPC can rest
+-- in. Standable: the body cell must be walkable (air, not a wall or
+-- door) and the node below must be solid ground (not the edge of a
+-- pit); the body-cell test comes first so the common wall case
+-- short-circuits without a second node read.
+function npc.nav._follow_slots(self, leader_cell, d, seed)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	local n = follow.distance
+	if type(n) ~= "number" or n < 1 then
+		n = 1
+	end
+	local ahead = (follow.mode == "ahead")
+	local px = (ahead or seed) and 1 or -1
+	local cells = {}
+	local function add(c)
+		for i = 1, #cells do
+			if cells[i].x == c.x and cells[i].y == c.y
+					and cells[i].z == c.z then
+				return
+			end
+		end
+		-- Ungenerated positions read as nil nodes: not standable.
+		local body = minetest.get_node(c)
+		local below = minetest.get_node({x = c.x, y = c.y - 1, z = c.z})
+		if body ~= nil and below ~= nil
+			and npc.pathfinder.is_good_node(body, {})
+					== npc.pathfinder.node_types.walkable
+			and npc.pathfinder.is_good_node(below, {})
+					~= npc.pathfinder.node_types.walkable then
+			table.insert(cells, c)
+		end
+	end
+	add({x = leader_cell.x + d.x * n * px, y = leader_cell.y + d.y * n * px,
+		z = leader_cell.z + d.z * n * px})
+	add({x = leader_cell.x - d.x * n * px, y = leader_cell.y - d.y * n * px,
+		z = leader_cell.z - d.z * n * px})
+	add({x = leader_cell.x + n, y = leader_cell.y, z = leader_cell.z})
+	add({x = leader_cell.x - n, y = leader_cell.y, z = leader_cell.z})
+	add({x = leader_cell.x, y = leader_cell.y, z = leader_cell.z + n})
+	add({x = leader_cell.x, y = leader_cell.y, z = leader_cell.z - n})
+	return cells
+end
+
+-- Pick the follow goal cell for a live leader position (see the
+-- section header): the predictive lead is applied here so the goal
+-- anticipates the leader's next cell. Direction bookkeeping (the
+-- leader's cell change records the travel direction; the last
+-- direction is kept while the leader stands still; the seed pass
+-- uses the follower's own side and is deliberately not stored) lives
+-- on the nav session. Returns the goal cell (the first standable
+-- slot candidate), or nil when the leader is in the follower's own
+-- cell with no direction on record yet.
+function npc.nav._follow_slot(self, leader_pos)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	local pred = npc.nav._follow_predict(self, leader_pos)
+	local leader_cell = vector.round(pred)
+	local follower_cell = vector.round(self.object:get_pos())
+
+	local d
+	local seed = false
+	if nav.follow_prev_cell ~= nil
+			and (nav.follow_prev_cell.x ~= leader_cell.x
+				or nav.follow_prev_cell.z ~= leader_cell.z) then
+		-- The leader moved: the axis-wise sign of its last move.
+		d = {
+			x = sign(leader_cell.x - nav.follow_prev_cell.x),
+			y = sign(leader_cell.y - nav.follow_prev_cell.y),
+			z = sign(leader_cell.z - nav.follow_prev_cell.z),
+		}
+		nav.follow_last_dir = d
+	else
+		-- The leader stands still (or this is the first pass): keep the
+		-- last recorded travel direction so the goal stays stable and
+		-- the follower holds the slot on its side of the leader.
+		if nav.follow_last_dir ~= nil then
+			d = nav.follow_last_dir
+		else
+			if leader_cell.x == follower_cell.x
+					and leader_cell.z == follower_cell.z then
+				-- Same cell and no direction on record: nothing to
+				-- follow yet - the program stands down until the leader
+				-- moves (or the follower leaves the cell).
+				nav.follow_prev_cell = leader_cell
+				follow.pred_cell = leader_cell
+				follow.cached_goal = nil
+				return nil
+			end
+			-- First pass, leader stationary: there is no travel direction
+			-- yet. Use the follower's own side of the leader so both
+			-- behind and ahead keep the slot the follower already
+			-- occupies until the leader moves.
+			d = {
+				x = sign(follower_cell.x - leader_cell.x),
+				y = 0,
+				z = sign(follower_cell.z - leader_cell.z),
+			}
+			seed = true
+		end
+	end
+
+	nav.follow_prev_cell = leader_cell
+	-- Predicted-cell goal cache: while the leader's predicted cell is
+	-- unchanged the goal cell cannot change. npc.nav.follow_goal and
+	-- npc.nav.follow_next_leg gate on it to skip the slot node reads.
+	follow.pred_cell = leader_cell
+	local cells = npc.nav._follow_slots(self, leader_cell, d, seed)
+	if #cells == 0 then
+		follow.cached_goal = nil
+		return nil -- no standable slot: nothing to aim at
+	end
+	follow.cached_goal = cells[1]
+	nav.follow_goal = cells[1]
+	return cells[1]
+end
+
+-- Program entry for the npc:follow goal cell: resolve the leader,
+-- (re)initialize the follow session, and pick the goal cell.
+-- Returns the goal cell (the program stores it in a local), or nil
+-- when the leader cannot be resolved (the program then stands down).
+function npc.nav.follow_goal(self, args)
+	local leader = npc.nav.follow_leader(self, args.name)
+	if leader == nil and args.object ~= nil and type(args.object) == "userdata" then
+		leader = args.object
+	end
+	if leader == nil or leader:get_pos() == nil then
+		return nil
+	end
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	if follow == nil or (args.name ~= nil and follow.name ~= args.name) then
+		follow = {name = args.name}
+		nav.follow = follow
+		-- A new leader: drop the direction bookkeeping (it belongs to
+		-- the previous leader).
+		nav.follow_prev_cell = nil
+		nav.follow_last_dir = nil
+	end
+	follow.leader = leader
+	follow.mode = args.mode
+	-- Default 2 cells (with the zero-lead default below the goal is
+	-- always at least 2 cells behind the leader's live cell, so the
+	-- NPC cannot bump into a walking leader).
+	follow.distance = (type(args.distance) == "number" and args.distance >= 1)
+		and args.distance or 2
+	-- Default zero lead: the goal aims at the leader's current cell.
+	-- A positive lead can push the goal onto the leader's own cell at
+	-- small distances and make the NPC bump into a walking leader.
+	follow.lead = (type(args.lead) == "number" and args.lead >= 0) and args.lead or 0
+	-- Catch-up distance (cells, see npc.nav.follow_speed): the
+	-- follower only resumes a walk - and only switches to the
+	-- catch-up speed - once the gap to the leader reaches this
+	-- distance, and it stays in the catch-up speed until the gap
+	-- closes back to the follow distance. Default 2 x the follow
+	-- distance; clamped to at least the follow distance (a catch-up
+	-- zone inside the slot would fight the arrival).
+	follow.catch_up = (type(args.catch_up) == "number" and args.catch_up >= 1)
+		and math.floor(args.catch_up) or (follow.distance * 2)
+	if follow.catch_up < follow.distance then
+		follow.catch_up = follow.distance
+	end
+	-- Default follow speed: the leader's walk speed minus 0.25 m/s,
+	-- so the follower stays just under the leader's pace; the
+	-- catch-up speed is the walk speed plus 0.25 m/s (see
+	-- npc.nav.follow_speed for the gap band between the two). The
+	-- base walk speed is the engine setting `movement_speed_walk`
+	-- (engine default 4.0, nodes/s) - read from the engine, not a
+	-- Minetest-Game constant, so a game that sets a different base
+	-- value keeps the follower at the leader's pace - scaled by any
+	-- per-player physics override (the actual walk speed is the
+	-- product of the `speed` and `speed_walk` multipliers, see
+	-- set_physics_override). An explicit `speed` argument on the
+	-- program wins (the entry resolves args over defaults); when the
+	-- setting is unreadable the entry default (5 m/s) applies.
+	local base_walk_speed
+	if minetest.settings ~= nil and minetest.settings.get ~= nil then
+		local ws = minetest.settings:get("movement_speed_walk")
+		if type(ws) == "number" then
+			base_walk_speed = ws
+		elseif type(ws) == "string" then
+			base_walk_speed = tonumber(ws)
+		end
+	end
+	if base_walk_speed ~= nil and base_walk_speed > 0.5 then
+		local leader_walk_speed = base_walk_speed
+		if leader.get_physics_override ~= nil then
+			local po = leader:get_physics_override()
+			if type(po) == "table" then
+				leader_walk_speed = leader_walk_speed
+					* (type(po.speed) == "number" and po.speed or 1)
+					* (type(po.speed_walk) == "number" and po.speed_walk or 1)
+			end
+		end
+		-- Normal speed: just under the leader's pace; catch-up
+		-- speed: just over it (npc.nav.follow_speed switches
+		-- between the two on the gap band).
+		follow.speed = leader_walk_speed - 0.25
+		follow.speed_catchup = leader_walk_speed + 0.25
+	end
+	if _npc.follow_speed_logged == false then
+		_npc.follow_speed_logged = true
+		if follow.speed ~= nil then
+			minetest.log(string.format(
+				"[anpc] follow default speed: %.2f m/s (walk %.2f - 0.25, catch-up %.2f)",
+				follow.speed, follow.speed + 0.25, follow.speed + 0.5))
+		else
+			minetest.log("[anpc] follow default speed: "
+				.. "movement_speed_walk unreadable, using the 5 m/s "
+				.. "entry default")
+		end
+	end
+	-- Goal cache: while the leader's predicted cell is unchanged the
+	-- goal cell cannot change - return the cached goal without the
+	-- slot node reads (the common case while the leader stands still).
+	local pred_cell = vector.round(npc.nav._follow_predict(self, leader:get_pos()))
+	if follow.cached_goal ~= nil
+			and follow.pred_cell ~= nil
+			and pred_cell.x == follow.pred_cell.x
+			and pred_cell.y == follow.pred_cell.y
+			and pred_cell.z == follow.pred_cell.z then
+		return follow.cached_goal
+	end
+	return npc.nav._follow_slot(self, leader:get_pos())
+end
+
+-- Speed selection for continuous follow, resolved at every walk
+-- (re)arm (the npc:follow program pass, 0.05 s). An explicit `speed`
+-- argument on the program wins for the normal speed; otherwise the
+-- derived default (the leader's walk speed minus 0.25 m/s, see
+-- npc.nav.follow_goal). The catch-up speed is 0.5 m/s above the
+-- normal speed (the leader's walk speed plus 0.25 m/s on the
+-- default). Hysteresis on the gap to the leader: the catch-up speed
+-- engages when the gap reaches `catch_up` (default 2 x the follow
+-- distance) and stays engaged until the gap closes back to the
+-- follow distance - so a straight walk at the slower default speed
+-- necessarily falls behind, the follower bursts to close the gap,
+-- and the gap oscillates inside the band. The same band is the
+-- resume gate: an idle follower only starts walking at all when the
+-- gap reaches `catch_up` (enforced by the walk_to_cell_ll entry).
+function npc.nav.follow_speed(self, args)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	if follow == nil then
+		return args.speed or 5
+	end
+	local normal = args.speed or follow.speed or 5
+	local catchup
+	if type(args.speed) == "number" then
+		-- Explicit program speed: the catch-up burst is 0.5 m/s
+		-- above the requested speed.
+		catchup = args.speed + 0.5
+	elseif follow.speed_catchup ~= nil then
+		catchup = follow.speed_catchup
+	else
+		catchup = normal + 0.5
+	end
+	local leader_pos = follow.leader ~= nil and follow.leader:get_pos() or nil
+	if leader_pos == nil then
+		return normal
+	end
+	local gap = vector.distance(self.object:get_pos(), leader_pos)
+	if follow.catch_mode == true then
+		if gap <= follow.distance then
+			follow.catch_mode = false -- the slot is reached again
+		end
+	else
+		if gap >= follow.catch_up then
+			follow.catch_mode = true -- fell behind: catch up
+		end
+	end
+	return (follow.catch_mode == true) and catchup or normal
+end
+
+-- Per-tick continuous-follow update (see the section header). Called
+-- from npc.nav.step while the ll walk task is active.
+function npc.nav.follow_track(self, dtime)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	if follow == nil then
+		return
+	end
+	-- Stale follow session (the state process is no longer
+	-- npc:follow - e.g. the follow item toggled off while a leg was
+	-- in flight): drop it so the current walk is not hijacked.
+	if self.process.state.name ~= "npc:follow" then
+		nav.follow = nil
+		nav.steer = false
+		nav.steer_stuck = nil
+		nav.follow_fail_cd = nil
+		return
+	end
+	-- Failure-cooldown countdown (npc.nav._follow_plan): 0.5 s
+	-- between real follow A* failures, stepped by the tick.
+	if (nav.follow_fail_cd or 0) > 0 then
+		nav.follow_fail_cd = nav.follow_fail_cd - dtime
+		if nav.follow_fail_cd < 0 then
+			nav.follow_fail_cd = 0
+		end
+	end
+	-- Validate the cached leader ref (stale after dormancy or
+	-- removal); re-resolve by name.
+	local leader_pos = follow.leader:get_pos()
+	if leader_pos == nil then
+		local leader = npc.nav.follow_leader(self, follow.name)
+		if leader == nil then
+			-- Leader gone: keep walking to the last goal; the program
+			-- stands down on the next pass.
+			return
+		end
+		follow.leader = leader
+		leader_pos = leader:get_pos()
+		if leader_pos == nil then
+			return
+		end
+	end
+	local pred = npc.nav._follow_predict(self, leader_pos)
+	local pred_cell = vector.round(pred)
+	if follow.pred_cell ~= nil and pred_cell.x == follow.pred_cell.x
+			and pred_cell.y == follow.pred_cell.y
+			and pred_cell.z == follow.pred_cell.z then
+		return -- goal cell unchanged: nothing to do this tick
+	end
+	follow.pred_cell = pred_cell
+	-- The predicted cell changed: any steer-stuck hold belonged to
+	-- the old goal - lift it so the NPC re-engages.
+	nav.steer_stuck = nil
+	local goal = npc.nav._follow_slot(self, leader_pos)
+	if goal == nil then
+		return -- nothing to follow yet (leader in our cell, no
+		-- direction): keep the current walk
+	end
+	if nav.trgt_pos ~= nil and goal.x == nav.trgt_pos.x
+			and goal.y == nav.trgt_pos.y and goal.z == nav.trgt_pos.z then
+		nav.u_trgt_pos = {x = goal.x, y = goal.y, z = goal.z}
+		nav.prev_u_trgt_pos = nav.u_trgt_pos
+		return -- the path already heads there
+	end
+	-- Continuation test: the remaining path already passes through
+	-- the new goal cell - truncate instead of re-planning.
+	local path = nav.path
+	if path ~= nil then
+		for i = 1, #path do
+			if path[i].pos.x == goal.x and path[i].pos.y == goal.y
+					and path[i].pos.z == goal.z then
+				for j = #path, i + 1, -1 do
+					path[j] = nil
+				end
+				nav.trgt_pos = goal
+				nav.u_trgt_pos = {x = goal.x, y = goal.y, z = goal.z}
+				nav.prev_u_trgt_pos = nav.u_trgt_pos
+				return
+			end
+		end
+	end
+	-- Rate-limited full re-plan (the same small A* the reached_head
+	-- re-plan uses).
+	local new_path = npc.nav._follow_plan(self, goal)
+	if type(new_path) == "table" then
+		nav.path = new_path
+		nav.trgt_pos = goal
+		nav.u_trgt_pos = {x = goal.x, y = goal.y, z = goal.z}
+		nav.prev_u_trgt_pos = nav.u_trgt_pos
+		nav.steer = false
+		return
+	end
+	-- Unreachable (or a plan skipped by the failure cooldown): slot
+	-- ladder, then direct steering (see the section header).
+	npc.nav.follow_fallback(self, goal)
+end
+
+-- The follow fallback (see the section header): the goal cell is
+-- unreachable (or a plan was skipped by the failure cooldown). Try
+-- the remaining slot-ladder candidates (2 = the opposite slot, 3-6 =
+-- the cardinal slots; the primary is the goal itself, which the
+-- caller already planned) with the rate-limited plan - under an
+-- active cooldown every candidate skips for free. When every
+-- candidate is unreachable (or skipped) steer the NPC directly at
+-- the goal cell. Returns "path" (a candidate reached -
+-- nav.path/trgt_pos updated), "steer" (steering at the goal cell) or
+-- nil (the leader is gone).
+function npc.nav.follow_fallback(self, goal)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	if follow == nil or follow.leader == nil then
+		return nil
+	end
+	local leader_pos = follow.leader:get_pos()
+	if leader_pos == nil then
+		local leader = npc.nav.follow_leader(self, follow.name)
+		if leader == nil then
+			return nil
+		end
+		follow.leader = leader
+		leader_pos = leader:get_pos()
+		if leader_pos == nil then
+			return nil
+		end
+	end
+	local pred_cell = vector.round(npc.nav._follow_predict(self, leader_pos))
+	local d = nav.follow_last_dir
+	local cells = npc.nav._follow_slots(self, pred_cell,
+		d ~= nil and d or {x = 0, y = 0, z = 0}, d == nil)
+	for i = 2, #cells do
+		local cand = cells[i]
+		local path = npc.nav._follow_plan(self, cand)
+		if type(path) == "table" then
+			nav.path = path
+			nav.trgt_pos = cand
+			nav.u_trgt_pos = {x = cand.x, y = cand.y, z = cand.z}
+			nav.prev_u_trgt_pos = nav.u_trgt_pos
+			nav.prev_self_pos = self.object:get_pos()
+			nav.steer = false
+			nav.stuck_time = 0
+			nav.stuck_acc = 0
+			nav.active = true
+			nav.last_status = "moving"
+			return "path"
+		end
+	end
+	-- Every candidate unreachable (or the plan skipped by the
+	-- cooldown): steer directly at the goal cell; the rate-limited
+	-- search retry in npc.nav.step's re-plan branch picks up a path
+	-- as soon as one opens.
+	nav.trgt_pos = goal
+	nav.u_trgt_pos = {x = goal.x, y = goal.y, z = goal.z}
+	nav.prev_u_trgt_pos = nav.u_trgt_pos
+	nav.steer = true
+	nav.path = {}
+	nav.active = true
+	nav.last_status = "moving"
+	nav.stuck_time = 0
+	nav.stuck_acc = 0
+	return "steer"
+end
+
+-- Continuous-follow leg chaining (see the section header): called
+-- from the cell-arrival branch of npc.nav.step. If the goal cell
+-- moved while the NPC walked to the old one, start the next leg on
+-- this tick (no dead time between legs); otherwise return false and
+-- the normal arrival (stand down) happens.
+function npc.nav.follow_next_leg(self, dtime, u_self_pos)
+	local nav = npc.nav.session(self)
+	local follow = nav.follow
+	if follow == nil then
+		return false
+	end
+	local leader_pos = follow.leader:get_pos()
+	if leader_pos == nil then
+		local leader = npc.nav.follow_leader(self, follow.name)
+		if leader == nil then
+			return false -- leader gone: stand down
+		end
+		follow.leader = leader
+		leader_pos = leader:get_pos()
+		if leader_pos == nil then
+			return false
+		end
+	end
+	-- Goal cache gate (see the section header): while the leader's
+	-- predicted cell is unchanged the goal cell cannot change - use
+	-- the cached goal without the slot node reads.
+	local goal
+	local pred_cell = vector.round(npc.nav._follow_predict(self, leader_pos))
+	if follow.cached_goal ~= nil
+			and follow.pred_cell ~= nil
+			and pred_cell.x == follow.pred_cell.x
+			and pred_cell.y == follow.pred_cell.y
+			and pred_cell.z == follow.pred_cell.z then
+		goal = follow.cached_goal
+	else
+		goal = npc.nav._follow_slot(self, leader_pos)
+	end
+	if goal == nil then
+		return false
+	end
+	local self_cell = vector.round(u_self_pos)
+	if goal.x == self_cell.x and goal.y == self_cell.y
+			and goal.z == self_cell.z then
+		return false -- the NPC is in the slot: stand down
+	end
+	nav.path = nil
+	nav.stuck_time = 0
+	nav.stuck_acc = 0
+	local path = npc.nav._follow_plan(self, goal)
+	if type(path) == "table" then
+		nav.path = path
+		nav.trgt_pos = goal
+		nav.u_trgt_pos = {x = goal.x, y = goal.y, z = goal.z}
+		nav.prev_u_trgt_pos = nav.u_trgt_pos
+		nav.prev_self_pos = u_self_pos
+		nav.steer = false
+		nav.last_status = "moving"
+		return true
+	end
+	-- Unreachable (or a plan skipped by the failure cooldown): slot
+	-- ladder, then direct steering (see the section header).
+	local outcome = npc.nav.follow_fallback(self, goal)
+	if outcome == "path" or outcome == "steer" then
+		return true
+	end
+	return false
+end
+
 -- Shared stand-down: zero the velocity, play the stand animation, and
 -- (when look_at_pos is given) face the original target if it is a
 -- different cell than the accessed one.
@@ -2266,8 +3083,10 @@ end
 -- Start (or re-arm) a navigation session.
 -- args: target | target_pos, speed, target_distance, look_at_target,
 --       original_target_pos, check_end_pos_walkable, force,
---       min_self_move_distance, min_trgt_move_distance
--- defaults: per-entry-point values (speed, arrive_rule, target_distance)
+--       min_self_move_distance, min_trgt_move_distance, middle,
+--       door_close
+-- defaults: per-entry-point values (speed, arrive_rule, target_distance,
+--           middle)
 -- Returns "arrived" | "failed" | "moving".
 function npc.nav.start(self, args, defaults)
 	local nav = npc.nav.session(self)
@@ -2275,6 +3094,24 @@ function npc.nav.start(self, args, defaults)
 	local speed = args.speed or (defaults ~= nil and defaults.speed) or 2
 	local arrive_rule = (defaults ~= nil and defaults.arrive_rule) or "distance"
 	local target_distance = args.target_distance or (defaults ~= nil and defaults.target_distance) or 1.5
+	-- Block-middle walking (see the section header): args win over the
+	-- entry point's default; off unless requested.
+	local middle
+	if args.middle ~= nil then
+		middle = args.middle
+	elseif defaults ~= nil and defaults.middle ~= nil then
+		middle = defaults.middle
+	else
+		middle = false
+	end
+
+	-- Door-close policy for openable nodes (doors) the NPC passes
+	-- through (see the section header): "immediate" (default), "pause"
+	-- or "none". A re-arm keeps the policy unless args override it.
+	local door_close = args.door_close
+		or (defaults ~= nil and defaults.door_close)
+		or nav.door_close
+		or "immediate"
 
 	-- Resolve the target
 	local trgt = args.target
@@ -2309,6 +3146,11 @@ function npc.nav.start(self, args, defaults)
 		nav.stuck_acc = 0
 		nav.prev_self_pos = nil
 		nav.prev_u_trgt_pos = nil
+		-- Drop any in-flight door-close pause (it belonged to the old
+		-- walk; the new walk's door passages re-arm it themselves).
+		nav.door_close_cell = nil
+		nav.door_pause_cell = nil
+		nav.door_hold = 0
 	end
 
 	nav.active = true
@@ -2318,24 +3160,44 @@ function npc.nav.start(self, args, defaults)
 	nav.speed = speed
 	nav.arrive_rule = arrive_rule
 	nav.target_distance = target_distance
+	nav.middle = middle
+	nav.door_close = door_close
 	nav.look_at_target = args.look_at_target
 	nav.original_target_pos = args.original_target_pos
 	nav.force = args.force
+	-- Steering is a follow-only fallback mid-walk: every (re)arm
+	-- starts fresh.
+	nav.steer = false
 	nav.min_self_move_distance = args.min_self_move_distance or 0.25
 	nav.min_trgt_move_distance = args.min_trgt_move_distance or 0.25
 
 	-- Check if we are done (before any planning)
 	local u_self_pos = self.object:get_pos()
 	if arrive_rule == "cell" then
-		local self_pos = vector.round(u_self_pos)
-		if self_pos.x == trgt_pos.x
-			and self_pos.z == trgt_pos.z
-			and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
-			nav.active = false
-			nav.path = nil
-			npc.nav._stand(self, trgt_pos)
-			nav.last_status = "arrived"
-			return "arrived"
+		if middle == true then
+			-- Block-middle arrival: at the rest height on the target
+			-- cell middle (x/z within 0.25, y within 0.5 of cell y -
+			-- 0.5).
+			if math.abs(u_self_pos.x - trgt_pos.x) <= 0.25
+				and math.abs(u_self_pos.z - trgt_pos.z) <= 0.25
+				and math.abs(u_self_pos.y - (trgt_pos.y - 0.5)) <= 0.5 then
+				nav.active = false
+				nav.path = nil
+				npc.nav._stand(self, trgt_pos)
+				nav.last_status = "arrived"
+				return "arrived"
+			end
+		else
+			local self_pos = vector.round(u_self_pos)
+			if self_pos.x == trgt_pos.x
+				and self_pos.z == trgt_pos.z
+				and math.abs(trgt_pos.y - self_pos.y) < 0.5 then
+				nav.active = false
+				nav.path = nil
+				npc.nav._stand(self, trgt_pos)
+				nav.last_status = "arrived"
+				return "arrived"
+			end
 		end
 	elseif vector.distance(u_self_pos, u_trgt_pos) <= target_distance then
 		nav.active = false
@@ -2345,18 +3207,27 @@ function npc.nav.start(self, args, defaults)
 		return "arrived"
 	end
 
-	-- First plan (a re-arm with a usable cached path keeps it)
+	-- First plan (a re-arm with a usable cached path keeps it).
+	-- Block-middle: if we are already in the target cell, a same-cell
+	-- path search returns nil and would fail the walk. Leave the path
+	-- empty; nav.step steers straight at the cell middle instead.
 	if nav.path == nil or #nav.path == 0 then
-		nav.path = npc.nav._find_path(self, trgt_pos)
-		if nav.path == nil then
-			if nav.force == true then
-				self.object:move_to(trgt_pos, false)
+		local self_cell = vector.round(u_self_pos)
+		if middle == true and self_cell.x == trgt_pos.x
+				and self_cell.y == trgt_pos.y and self_cell.z == trgt_pos.z then
+			nav.path = {}
+		else
+			nav.path = npc.nav._find_path(self, trgt_pos)
+			if nav.path == nil then
+				if nav.force == true then
+					self.object:move_to(trgt_pos, false)
+				end
+				nav.active = false
+				nav.path = nil
+				npc.nav._stand(self, nil)
+				nav.last_status = "failed"
+				return "failed"
 			end
-			nav.active = false
-			nav.path = nil
-			npc.nav._stand(self, nil)
-			nav.last_status = "failed"
-			return "failed"
 		end
 	end
 
@@ -2383,11 +3254,154 @@ function npc.nav.step(self, dtime)
 	local u_self_pos = self.object:get_pos()
 	local self_pos = vector.round(u_self_pos)
 
+	-- Continuous follow (npc:follow): re-track the live leader's
+	-- goal cell for the active leg (see the section header). A no-op
+	-- without a follow session.
+	npc.nav.follow_track(self, dtime)
+
+	-- Door-close pause hold (door_close = "pause"): after the NPC
+	-- stopped, faced the door and closed it (trigger below), stand
+	-- still for a short beat before the walk resumes. A plain tick
+	-- counter in this driver - nothing to schedule or guard.
+	if (nav.door_hold or 0) > 0 then
+		nav.door_hold = nav.door_hold - 1
+		local y_speed = self.object:get_velocity().y
+		self.object:set_velocity({x = 0, y = y_speed, z = 0})
+		_npc.model.set_animation(self, {name = "stand"})
+		nav.prev_self_pos = u_self_pos
+		nav.prev_u_trgt_pos = nav.u_trgt_pos
+		nav.last_status = "moving"
+		return "moving"
+	end
+
+	-- Openable-passage tracking: remember the openable node (e.g. a
+	-- door) the NPC is currently standing in. When the NPC leaves that
+	-- cell (its center crosses into the next cell), the door_close
+	-- policy (see the section header) takes over:
+	--   "immediate": close the door now
+	--   "pause": remember the door; the close happens once the NPC
+	--            reaches the middle of the cell it just stepped into
+	--   "none": leave the door open
+	local cur_is_open = _npc.env.node_get_property(self, {property="is_open", pos=self_pos})
+	if cur_is_open ~= nil then
+		nav.in_openable_pos = {x=self_pos.x, y=self_pos.y, z=self_pos.z}
+	elseif nav.in_openable_pos ~= nil then
+		local openable_pos = nav.in_openable_pos
+		nav.in_openable_pos = nil
+		if nav.door_close == "immediate" then
+			-- Close it now: only if the node is still there and still
+			-- open (it may have been closed or removed in the
+			-- meantime). The NPC's center is already in the next
+			-- cell, so the solid door cannot trap it.
+			if _npc.env.node_get_property(self, {property="is_open", pos=openable_pos}) == true then
+				_npc.env.node_operate(self, {pos=openable_pos})
+			end
+		elseif nav.door_close == "pause" then
+			-- The NPC just stepped into self_pos; pause there.
+			nav.door_close_cell = openable_pos
+			nav.door_pause_cell = {x=self_pos.x, y=self_pos.y, z=self_pos.z}
+		end
+	end
+
+	-- Door-close pause trigger (door_close = "pause"): the NPC has
+	-- reached the middle of the cell it stepped into after the door.
+	-- Stop, face the door, close it; the hold at the top of this
+	-- function keeps the beat before the walk resumes.
+	local pause_cell = nav.door_pause_cell
+	if pause_cell ~= nil then
+		local at_pause_cell
+		if nav.middle == true then
+			at_pause_cell = math.abs(u_self_pos.x - pause_cell.x) <= 0.25
+				and math.abs(u_self_pos.z - pause_cell.z) <= 0.25
+		else
+			at_pause_cell = (self_pos.x == pause_cell.x
+				and self_pos.z == pause_cell.z)
+		end
+		if at_pause_cell then
+			nav.door_pause_cell = nil
+			local door_cell = nav.door_close_cell
+			nav.door_close_cell = nil
+			-- Face the middle of the door (its rest height), then
+			-- close it (only if it is still there and still open).
+			self.object:set_yaw(minetest.dir_to_yaw(vector.direction(u_self_pos,
+				{x = door_cell.x, y = door_cell.y - 0.5, z = door_cell.z})))
+			if _npc.env.node_get_property(self, {property="is_open", pos=door_cell}) == true then
+				_npc.env.node_operate(self, {pos=door_cell})
+			end
+			nav.door_hold = 10
+			local y_speed = self.object:get_velocity().y
+			self.object:set_velocity({x = 0, y = y_speed, z = 0})
+			nav.prev_self_pos = u_self_pos
+			nav.prev_u_trgt_pos = nav.u_trgt_pos
+			nav.last_status = "moving"
+			return "moving"
+		end
+	end
+
+	-- Steer-stuck hold (armed in the steer retry below): the last
+	-- steer attempt shoved the NPC into something for a full second
+	-- without moving. Stand still; the rate-limited re-plan (at most
+	-- one real A* per 0.5 s while holding) re-engages a path as soon
+	-- as one opens, and follow_track lifts the hold when the leader's
+	-- predicted cell changes.
+	if nav.steer_stuck == true then
+		local self_cell = vector.round(u_self_pos)
+		if nav.path ~= nil and #nav.path > 0 then
+			-- A path is back (follow_track re-planned this tick):
+			-- resume normal path walking.
+			nav.steer_stuck = nil
+		elseif self_cell.x == nav.trgt_pos.x
+				and self_cell.y == nav.trgt_pos.y
+				and self_cell.z == nav.trgt_pos.z then
+			-- In the goal cell: fall through so the arrival check can
+			-- end the walk (a held ll task would otherwise never
+			-- notice the arrival).
+			nav.steer_stuck = nil
+			nav.path = {}
+		else
+			local path = npc.nav._follow_plan(self, nav.trgt_pos)
+			if type(path) == "table" and #path > 0 then
+				nav.path = path
+				nav.steer_stuck = nil
+			else
+				local y_speed = self.object:get_velocity().y
+				self.object:set_velocity({x = 0, y = y_speed, z = 0})
+				_npc.model.set_animation(self, {name = "stand"})
+				nav.prev_self_pos = u_self_pos
+				nav.prev_u_trgt_pos = nav.u_trgt_pos
+				nav.last_status = "moving"
+				return "moving"
+			end
+		end
+	end
+
 	-- Check if we are done
 	if nav.arrive_rule == "cell" then
-		if self_pos.x == nav.trgt_pos.x
+		if nav.middle == true then
+			-- Block-middle arrival: at the rest height on the target
+			-- cell middle (x/z within 0.25, y within 0.5 of cell y -
+			-- 0.5).
+			if math.abs(u_self_pos.x - nav.trgt_pos.x) <= 0.25
+				and math.abs(u_self_pos.z - nav.trgt_pos.z) <= 0.25
+				and math.abs(u_self_pos.y - (nav.trgt_pos.y - 0.5)) <= 0.5 then
+				-- Continuous follow: chain the next leg on this tick
+				-- (no dead time between legs).
+				if npc.nav.follow_next_leg(self, dtime, u_self_pos) then
+					return "moving"
+				end
+				nav.active = false
+				nav.path = nil
+				npc.nav._stand(self, nav.trgt_pos)
+				nav.last_status = "arrived"
+				return "arrived"
+			end
+		elseif self_pos.x == nav.trgt_pos.x
 			and self_pos.z == nav.trgt_pos.z
 			and math.abs(nav.trgt_pos.y - self_pos.y) < 0.5 then
+			-- Continuous follow: chain the next leg on this tick.
+			if npc.nav.follow_next_leg(self, dtime, u_self_pos) then
+				return "moving"
+			end
 			nav.active = false
 			nav.path = nil
 			npc.nav._stand(self, nav.trgt_pos)
@@ -2395,6 +3409,10 @@ function npc.nav.step(self, dtime)
 			return "arrived"
 		end
 	elseif vector.distance(u_self_pos, nav.u_trgt_pos) <= nav.target_distance then
+		-- Continuous follow: chain the next leg on this tick.
+		if npc.nav.follow_next_leg(self, dtime, u_self_pos) then
+			return "moving"
+		end
 		nav.active = false
 		nav.path = nil
 		npc.nav._stand(self, nav.trgt_pos)
@@ -2427,22 +3445,88 @@ function npc.nav.step(self, dtime)
 		and (vector.distance(nav.prev_u_trgt_pos, nav.u_trgt_pos) > nav.min_trgt_move_distance)
 	local reached_head = (nav.path ~= nil and #nav.path >= 1)
 		and (nav.path[1].pos.x == self_pos.x and nav.path[1].pos.z == self_pos.z)
+	-- Block-middle: if we are already in the target cell, a same-cell
+	-- path search returns nil (and would fail the walk). Skip the
+	-- search and steer straight at the cell middle below instead; the
+	-- arrival check above ends the session once we are on it.
+	local middle_same_cell = (nav.middle == true)
+		and (self_pos.x == nav.trgt_pos.x and self_pos.y == nav.trgt_pos.y
+			and self_pos.z == nav.trgt_pos.z)
 	if (nav.path == nil or #nav.path == 0)
 		or (is_stuck == true)
 		or (trgt_moved == true)
 		or (reached_head == true) then
-		local path = npc.nav._find_path(self, nav.trgt_pos)
-		if path == nil then
-			if nav.force == true then
-				self.object:move_to(nav.trgt_pos, false)
+		if nav.steer == true then
+			-- Blocked while steering (pushed into a wall or the
+			-- leader for a full second without moving): enter the
+			-- steer-stuck hold instead of shoving forever; the hold's
+			-- rate-limited re-plan picks a path up as soon as one
+			-- opens.
+			if is_stuck == true then
+				nav.steer = false
+				nav.steer_stuck = true
+				nav.path = {}
+				local y_speed = self.object:get_velocity().y
+				self.object:set_velocity({x = 0, y = y_speed, z = 0})
+				_npc.model.set_animation(self, {name = "stand"})
+				nav.prev_self_pos = self.object:get_pos()
+				nav.prev_u_trgt_pos = nav.u_trgt_pos
+				nav.last_status = "moving"
+				return "moving"
 			end
-			nav.active = false
-			nav.path = nil
-			npc.nav._stand(self, nil)
-			nav.last_status = "failed"
-			return "failed"
+			-- Direct steering (the follow fallback): retry a
+			-- rate-limited search at the goal cell; a path resumes
+			-- normal path walking, otherwise keep steering (the
+			-- steering section below).
+			local path = npc.nav._follow_plan(self, nav.trgt_pos)
+			if type(path) == "table" and #path > 0 then
+				nav.path = path
+				nav.steer = false
+			else
+				nav.path = {}
+			end
+		elseif middle_same_cell == true then
+			nav.path = {}
+		else
+			local path = npc.nav._find_path(self, nav.trgt_pos)
+			if path == nil then
+				if nav.force == true then
+					self.object:move_to(nav.trgt_pos, false)
+				end
+				nav.active = false
+				nav.path = nil
+				npc.nav._stand(self, nil)
+				nav.last_status = "failed"
+				return "failed"
+			end
+			nav.path = path
 		end
-		nav.path = path
+	end
+
+	-- No path ahead: aim directly at the target cell middle (its
+	-- rest height) - block-middle same-cell, or direct steering
+	-- (the follow fallback at its goal cell).
+	if middle_same_cell == true or nav.steer == true then
+		local aim_pos = {x = nav.trgt_pos.x, y = nav.trgt_pos.y - 0.5,
+			z = nav.trgt_pos.z}
+		local dir = vector.normalize(vector.direction(u_self_pos, aim_pos))
+		local yaw
+		if nav.look_at_target then
+			yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, nav.u_trgt_pos))
+		else
+			yaw = minetest.dir_to_yaw(dir)
+		end
+		self.object:set_yaw(yaw)
+		-- Leave the vertical movement to the physics (gravity and
+		-- stepheight).
+		local y_speed = self.object:get_velocity().y
+		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, nav.speed)
+		self.object:set_velocity(vel)
+		_npc.model.set_animation(self, {name = "walk", speed = 30})
+		nav.prev_self_pos = self.object:get_pos()
+		nav.prev_u_trgt_pos = nav.u_trgt_pos
+		nav.last_status = "moving"
+		return "moving"
 	end
 
 	-- Move towards position.
@@ -2459,7 +3543,14 @@ function npc.nav.step(self, dtime)
 
 	local next_pos = next_node.pos
 
-	local dir = vector.normalize(vector.direction(u_self_pos, next_pos))
+	-- Block-middle steering: aim at the middle of the next block (its
+	-- rest height) instead of the cell coordinates.
+	local aim_pos = next_pos
+	if nav.middle == true then
+		aim_pos = {x = next_pos.x, y = next_pos.y - 0.5, z = next_pos.z}
+	end
+
+	local dir = vector.normalize(vector.direction(u_self_pos, aim_pos))
 	local yaw = 0
 	if nav.look_at_target then
 		yaw = minetest.dir_to_yaw(vector.direction(u_self_pos, nav.u_trgt_pos))
@@ -2490,7 +3581,7 @@ function npc.nav.step(self, dtime)
 
 	if (is_incline and not is_walkable_incline) then
 		-- Jump
-		_npc.move.jump(self, {target_pos = next_pos})
+		_npc.move.jump(self, {target_pos = next_pos, middle = (nav.middle == true)})
 	else
 		-- Leave the vertical movement to the physics (gravity and
 		-- stepheight). A large negative y speed made the NPC dive and
@@ -2501,29 +3592,15 @@ function npc.nav.step(self, dtime)
 		_npc.model.set_animation(self, {name = "walk", speed = 30})
 	end
 
-	-- If openable, check the state. If it's open, NPC will close. If it's closed,
-	-- NPC will open and close.
+	-- If the next node in the path is openable (e.g. a door), open
+	-- it if it's closed. Closing is handled when the NPC leaves the
+	-- door cell (passage tracking at the top of npc.nav.step), so
+	-- this only opens - the door is left open until the NPC is
+	-- through it.
 	if next_node.type == npc.pathfinder.node_types.openable then
 		local is_open = _npc.env.node_get_property(self, {property="is_open", pos=next_pos})
-		if (is_open ~= nil) then
-			if (is_open == true) then
-				minetest.after(1, function()
-					-- Guard against the entity being gone by the time
-					-- the retry fires.
-					if not self.object:is_gone() then
-						_npc.env.node_operate(self, {pos=next_pos})
-					end
-				end)
-			elseif (is_open == false) then
-				_npc.env.node_operate(self, {pos=next_pos})
-				minetest.after(1, function()
-					-- Guard against the entity being gone by the time
-					-- the retry fires.
-					if not self.object:is_gone() then
-						_npc.env.node_operate(self, {pos=next_pos})
-					end
-				end)
-			end
+		if is_open == false then
+			_npc.env.node_operate(self, {pos=next_pos})
 		end
 	end
 
@@ -2558,6 +3635,13 @@ end
 -- Walk instruction using pathfinding
 -- Supports climbing stairs/slabs, jumping and opening doors (the
 -- per-tick work lives in the npc.nav section above).
+-- Walks block-middle to block-middle by default (middle = true): the
+-- target, the per-tick aim and the jump arc all use the middle of each
+-- block (cell y - 0.5). Pass middle = false to keep the legacy
+-- cell-corner behavior.
+-- args.door_close: "immediate" (default) | "pause" | "none" - how the
+-- door is closed after the NPC passes through it (npc.nav section
+-- header).
 npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	local speed = args.speed or 2
 
@@ -2566,7 +3650,7 @@ npc.proc.register_instruction("npc:move:walk_to_pos", function(self, args)
 	local prev_proc_int = self.timers.proc_int
 	self.timers.proc_int = (1/speed) / 2
 
-	local status = npc.nav.start(self, args, {speed = speed, arrive_rule = "cell"})
+	local status = npc.nav.start(self, args, {speed = speed, arrive_rule = "cell", middle = true})
 	if status == "moving" then
 		-- The low-latency task drives the per-tick movement
 		self.timers.hl_task_int = 30
@@ -3120,6 +4204,9 @@ npc.on_activate = function(self, staticdata)
 			nav = {},
 			schedule = {}
 		}
+		-- Prime the object table: the first refresh runs 1 s later, but
+		-- a program may resolve @objs arguments on its very first pass.
+		self.data.env.objects = {}
 		
 		self.debug = {
 			show_debugger = false,
@@ -3258,7 +4345,18 @@ npc.proc.register_low_latency_task("npc:move:jump", function(self, dtime, args)
 		self.object:set_velocity({x=0, y=0, z=0})
 		return true
 	end
-	-- Not landed yet
+	-- Not landed yet: re-assert the horizontal launch velocity. The
+	-- per-axis collision resolution zeroes the velocity of any axis
+	-- that presses into a face, so without this the step-up arc loses
+	-- its x/z component the moment the box's lower half touches the
+	-- step face and the jump degenerates into a vertical hop in place.
+	-- Keep the engine-managed y (gravity, ceiling handling). In free
+	-- air this is a no-op: the launch velocity is constant, which is
+	-- exactly the ballistic arc the takeoff set.
+	if (self.jump_xvel ~= nil or self.jump_zvel ~= nil) then
+		local vel = self.object:get_velocity()
+		self.object:set_velocity({x = self.jump_xvel or 0, y = vel.y, z = self.jump_zvel or 0})
+	end
 	return false
 end)
 
@@ -3268,6 +4366,9 @@ end)
 -- The per-tick work (planning, node advancement, aiming, stairs,
 -- jumps, doors, arrival and stuck handling) lives in the shared
 -- navigation session - see the npc.nav section above.
+-- Distance arrival on live coordinates stays on for this entry
+-- point: its callers walk to moving objects or exact positions where
+-- the live coordinates matter more than the block middle.
 npc.proc.register_low_latency_task("npc:move:walk_to", function(self, dtime, args)
 	return npc.nav.step(self, dtime) ~= "moving"
 end)
@@ -3278,6 +4379,57 @@ npc.proc.register_instruction("npc:move:walk_to_pos_ll", function(self, args)
 		self.timers.hl_task_int = 30
 		npc.proc.execute_ll_task(self, "npc:move:walk_to", args)
 	end
+end)
+
+-- Cell-arrival ll entry point for the npc:follow goal cell:
+-- block-middle walking, cell arrival, so the NPC rests at the middle
+-- of the goal cell. The goal is re-tracked per tick by npc.nav:
+-- follow_track while the ll task is active (see the section header).
+-- A failed initial plan does not freeze the follow: the follow
+-- fallback (slot ladder, then direct steering) takes over instead.
+npc.proc.register_instruction("npc:move:walk_to_cell_ll", function(self, args)
+	local nav = npc.nav.session(self)
+	-- Resume gate (continuous follow, see npc.nav.follow_speed): an
+	-- idle follower (no active walk) only starts walking again when
+	-- the leader is at least `catch_up` cells away (default 2 x the
+	-- follow distance); a leader moving a couple of steps around a
+	-- place does not drag the NPC.
+	local follow = nav.follow
+	if follow ~= nil and nav.active == false then
+		local leader_pos = follow.leader ~= nil and follow.leader:get_pos() or nil
+		if leader_pos ~= nil then
+			local gap = vector.distance(self.object:get_pos(), leader_pos)
+			if gap < follow.catch_up then
+				npc.nav._stand(self, nil)
+				return -- stand down (no walk this pass)
+			end
+		end
+	end
+	-- Speed: the derived follow speed with the catch-up hysteresis
+	-- (npc.nav.follow_speed); an explicit speed argument on the
+	-- program wins for the normal speed.
+	local speed = npc.nav.follow_speed(self, args)
+	local status = npc.nav.start(self, args, {speed = speed, arrive_rule = "cell", middle = true})
+	if status == "failed" and npc.nav.session(self).follow ~= nil
+			and args.target_pos ~= nil then
+		-- The initial goal cell was unreachable: fall back to the
+		-- slot ladder / direct steering instead of freezing the
+		-- follow session.
+		local outcome = npc.nav.follow_fallback(self, vector.round(args.target_pos))
+		if outcome == "path" or outcome == "steer" then
+			status = "moving"
+		end
+	end
+	if status == "moving" then
+		self.timers.hl_task_int = 30
+		npc.proc.execute_ll_task(self, "npc:move:walk_to", args)
+	end
+end)
+
+-- Compute the npc:follow goal cell (behind/ahead of the tracked
+-- leader); the program stores the result in a local variable.
+npc.proc.register_instruction("npc:nav:follow_goal", function(self, args)
+	return npc.nav.follow_goal(self, args)
 end)
 
 ---------------------------------------------------------------------
@@ -3304,32 +4456,59 @@ minetest.register_craftitem("anpc:npc_spawner", {
 	end
 })
 
------------------------------------------------------------------------------------
--- Node registrations
------------------------------------------------------------------------------------
+-- Follow test item: left-click an anpc NPC with it to make that NPC
+-- follow the clicking player (runs the "npc:follow" state process,
+-- block-middle walking, 2 cells behind, walking speed = the
+-- player's walk speed minus 0.25 m/s with catch-up at 4 cells,
+-- immediate door closing).
+-- Left-click the same NPC with it again to stop following and
+-- restore the NPC's previous state process. Only works on engine
+-- NPCs (the pointed object must have the proc machinery).
+minetest.register_craftitem("anpc:follow_item", {
+	description = "Follow (test)",
+	inventory_image = "default_footprint.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if user == nil or pointed_thing == nil
+			or pointed_thing.type ~= "object" then
+			return itemstack
+		end
+		local npc_ent = pointed_thing.ref:get_luaentity()
+		-- Only engine NPCs: they have the data/process tables set up
+		-- in npc.on_activate.
+		if npc_ent == nil or npc_ent.data == nil
+			or npc_ent.process == nil or npc_ent.process.state == nil then
+			return itemstack
+		end
+		local state = npc_ent.process.state
+		if state.name == "npc:follow" then
+			-- Stop following: restore the previous state process.
+			local prev = npc_ent.data.follow_prev_state
+			npc_ent.data.follow_prev_state = nil
+			if prev ~= nil and prev.name ~= nil then
+				npc.proc.set_state_process(npc_ent, prev.name, prev.args, true)
+			end
+		else
+			-- Start following the clicking player. The leader is
+			-- resolved by player name each pass (@objs.get in the
+			-- npc:follow program), so the NPC tracks the player even
+			-- while the goal cell stays static for one walk.
+			npc_ent.data.follow_prev_state = {
+				name = state.name,
+				args = state.args,
+			}
+			npc.proc.set_state_process(npc_ent, "npc:follow", {
+				object = user:get_player_name(),
+				follow_mode = "behind",
+				follow_distance = 2,
+			}, true)
+		end
+		return itemstack
+	end
+})
 
-npc.env.register_node("doors:door_wood_a", {"openable", "doors"},
-	{["is_open"] = function(self, args)
-		return false
-	end},
-	function(self, args)
-		local node = minetest.get_node(args.pos)
-		local clicker = self
-		clicker.is_player = function() return true end
-    	clicker.get_player_name = function(self) return "npc" end
-		minetest.registered_nodes["doors:door_wood_a"].on_rightclick(args.pos, node, clicker, nil, nil)
-	end)
-
-npc.env.register_node("doors:door_wood_b", {"openable", "doors"},
-	{["is_open"] = function(self, args)
-		return true
-	end},
-	function(self, args)
-		local node = minetest.get_node(args.pos)
-		local clicker = self
-		clicker.is_player = function() return true end
-    	clicker.get_player_name = function(self) return "npc" end
-		minetest.registered_nodes["doors:door_wood_b"].on_rightclick(args.pos, node, clicker, nil, nil)
-	end)
+-- Node registrations live in the per-game files under nodes/
+-- (e.g. nodes/minetest_game.lua), loaded by init.lua. The engine
+-- itself only operates on nodes registered there by category
+-- (e.g. "openable"), so it stays game-agnostic.
 
 

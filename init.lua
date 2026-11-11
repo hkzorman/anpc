@@ -11,3 +11,5 @@ dofile(path .. "/pathfinder.lua")
 dofile(path .. "/builtin.lua")
 dofile(path .. "/vegetarian.lua")
 dofile(path .. "/torcherer.lua")
+-- Game-specific node registrations (nodes of the game's own mods).
+dofile(path .. "/nodes/minetest_game.lua")
