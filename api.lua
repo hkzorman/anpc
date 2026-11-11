@@ -1764,7 +1764,7 @@ _npc.env.node_place = function(self, args)
             -- Place node
             if place_item == true then
                 -- Set mine animation
-                _npc.model.set_animation(self, {name = "mine_once"})
+                _npc.model.set_animation_once(self, {name = "mine_once"})
                 -- Place node
                 minetest.set_node(pos, {name=node, param1=param1, param2=param2})
                 -- Play place sound
@@ -1816,7 +1816,7 @@ _npc.model.set_animation = function(self, args)
     		(animation.end_frame - animation.start_frame) / animation.speed,
     		function(s)
     			if s.object ~= nil and s.object:get_luaentity() ~= nil then
-    				_npc.model.set_animation(s, {
+    				_npc.model.set_animation_once(s, {
     					name = args.animation_after or animation.animation_after
     				})
     			end
@@ -1825,6 +1825,28 @@ _npc.model.set_animation = function(self, args)
     end
 
     return true
+end
+
+-- Set an animation without re-applying it if it is already playing
+-- (same name and speed). The nav driver runs every ~30 ms and
+-- re-applying the same animation restarts the cycle, which chops
+-- the walk animation. Bookkeeping lives in self.data so callers
+-- that set animations raw (e.g. npc:model:set_animation from a
+-- program) only cause one extra apply before it is in sync again.
+_npc.model.set_animation_once = function(self, args)
+
+	assert(args.name or args.name == "", "Argument 'name' cannot be nil or empty.")
+	local speed = args.speed or 0
+	if self.data.animation == args.name and self.data.animation_speed == speed then
+		return true
+	end
+
+	if _npc.model.set_animation(self, args) == true then
+		self.data.animation = args.name
+		self.data.animation_speed = speed
+		return true
+	end
+	return false
 end
 
 npc.proc.register_instruction("npc:env:node:operate",
@@ -1870,7 +1892,7 @@ npc.proc.register_instruction("npc:env:node:dig", function(self, args)
 	local pos = args.pos
     if pos then
     	minetest.log("Digging at: "..minetest.pos_to_string(pos))
-    	_npc.model.set_animation(self, {name = "mine_once"})
+    	_npc.model.set_animation_once(self, {name = "mine_once"})
     	minetest.dig_node(pos)
    	end
 end)
@@ -1884,7 +1906,7 @@ npc.proc.register_instruction("npc:env:node:set", function(self, args)
 	local param2 = args.param2
 	if pos and node then
 		minetest.log("NPC Replacing node at "..minetest.pos_to_string(pos))
-		_npc.model.set_animation(self, {name = "mine_once"})
+		_npc.model.set_animation_once(self, {name = "mine_once"})
 		minetest.set_node(pos, {name=node, param1=param1, param2=param2})
 	end
 end)
@@ -2026,7 +2048,7 @@ end)
 npc.proc.register_instruction("npc:move:stand", function(self, args)
 	self.object:set_velocity({x=0, y=0, z=0})
 	-- TODO: Check if animation is registered
-	_npc.model.set_animation(self, {name = "stand"})
+	_npc.model.set_animation_once(self, {name = "stand"})
 end)
 
 npc.proc.register_instruction("npc:move:rotate", function(self, args)
@@ -2324,7 +2346,7 @@ npc.proc.register_instruction("npc:move:walk", function(self, args)
 
 	self.object:set_yaw(yaw)
 	self.object:set_velocity(velocity)
-	_npc.model.set_animation(self, {name = "walk", speed = 30})
+	_npc.model.set_animation_once(self, {name = "walk", speed = 30})
 end)
 
 -----------------------------------------------------------------------------------
@@ -2773,6 +2795,28 @@ function npc.nav.follow_goal(self, args)
 				.. "entry default")
 		end
 	end
+	-- Program pass interval: one pass per cell the leader can cross
+	-- (1 / leader's walk speed). The goal is a 1 m grid cell, so the
+	-- goal cell cannot get stale faster than that; clamped 0.1..0.5 s
+	-- for unusual custom speeds. Set on every pass - physics
+	-- overrides can change the leader's speed mid-follow.
+	local leader_pass_speed
+	if type(args.speed) == "number" then
+		leader_pass_speed = args.speed + 0.25
+	elseif follow.speed_catchup ~= nil then
+		leader_pass_speed = follow.speed_catchup - 0.25
+	else
+		leader_pass_speed = 4
+	end
+	if leader_pass_speed > 0.5 then
+		local interval = 1 / leader_pass_speed
+		if interval < 0.1 then
+			interval = 0.1
+		elseif interval > 0.5 then
+			interval = 0.5
+		end
+		self.timers.proc_int = interval
+	end
 	-- Goal cache: while the leader's predicted cell is unchanged the
 	-- goal cell cannot change - return the cached goal without the
 	-- slot node reads (the common case while the leader stands still).
@@ -3071,7 +3115,7 @@ end
 function npc.nav._stand(self, look_at_pos)
 	self.object:set_velocity({x = 0, y = 0, z = 0})
 	-- TODO: Check if animation exists?
-	_npc.model.set_animation(self, {name = "stand"})
+	_npc.model.set_animation_once(self, {name = "stand"})
 	local nav = self.data.nav
 	if look_at_pos ~= nil and nav.original_target_pos ~= nil
 		and (nav.original_target_pos.x ~= look_at_pos.x
@@ -3267,7 +3311,7 @@ function npc.nav.step(self, dtime)
 		nav.door_hold = nav.door_hold - 1
 		local y_speed = self.object:get_velocity().y
 		self.object:set_velocity({x = 0, y = y_speed, z = 0})
-		_npc.model.set_animation(self, {name = "stand"})
+		_npc.model.set_animation_once(self, {name = "stand"})
 		nav.prev_self_pos = u_self_pos
 		nav.prev_u_trgt_pos = nav.u_trgt_pos
 		nav.last_status = "moving"
@@ -3366,7 +3410,7 @@ function npc.nav.step(self, dtime)
 			else
 				local y_speed = self.object:get_velocity().y
 				self.object:set_velocity({x = 0, y = y_speed, z = 0})
-				_npc.model.set_animation(self, {name = "stand"})
+				_npc.model.set_animation_once(self, {name = "stand"})
 				nav.prev_self_pos = u_self_pos
 				nav.prev_u_trgt_pos = nav.u_trgt_pos
 				nav.last_status = "moving"
@@ -3468,7 +3512,7 @@ function npc.nav.step(self, dtime)
 				nav.path = {}
 				local y_speed = self.object:get_velocity().y
 				self.object:set_velocity({x = 0, y = y_speed, z = 0})
-				_npc.model.set_animation(self, {name = "stand"})
+				_npc.model.set_animation_once(self, {name = "stand"})
 				nav.prev_self_pos = self.object:get_pos()
 				nav.prev_u_trgt_pos = nav.u_trgt_pos
 				nav.last_status = "moving"
@@ -3522,7 +3566,7 @@ function npc.nav.step(self, dtime)
 		local y_speed = self.object:get_velocity().y
 		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, nav.speed)
 		self.object:set_velocity(vel)
-		_npc.model.set_animation(self, {name = "walk", speed = 30})
+		_npc.model.set_animation_once(self, {name = "walk", speed = 30})
 		nav.prev_self_pos = self.object:get_pos()
 		nav.prev_u_trgt_pos = nav.u_trgt_pos
 		nav.last_status = "moving"
@@ -3589,7 +3633,7 @@ function npc.nav.step(self, dtime)
 		local y_speed = self.object:get_velocity().y
 		local vel = vector.multiply({x=dir.x, y=y_speed, z=dir.z}, nav.speed)
 		self.object:set_velocity(vel)
-		_npc.model.set_animation(self, {name = "walk", speed = 30})
+		_npc.model.set_animation_once(self, {name = "walk", speed = 30})
 	end
 
 	-- If the next node in the path is openable (e.g. a door), open
@@ -3616,7 +3660,7 @@ function npc.nav.stop(self)
 	local nav = npc.nav.session(self)
 	if nav.active == true then
 		self.object:set_velocity({x = 0, y = 0, z = 0})
-		_npc.model.set_animation(self, {name = "stand"})
+		_npc.model.set_animation_once(self, {name = "stand"})
 	end
 	nav.active = false
 	nav.path = nil
@@ -4401,6 +4445,11 @@ npc.proc.register_instruction("npc:move:walk_to_cell_ll", function(self, args)
 			local gap = vector.distance(self.object:get_pos(), leader_pos)
 			if gap < follow.catch_up then
 				npc.nav._stand(self, nil)
+				-- Face the leader while holding the slot (leader idle
+				-- inside the catch-up band): re-aimed on every pass,
+				-- so the NPC keeps tracking the leader until the
+				-- catch-up gate starts a walk.
+				self.object:set_yaw(minetest.dir_to_yaw(vector.direction(self.object:get_pos(), leader_pos)))
 				return -- stand down (no walk this pass)
 			end
 		end

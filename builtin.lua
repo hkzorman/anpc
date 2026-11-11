@@ -46,7 +46,11 @@ npc.proc.register_program("npc:walk_to_pos", {
 -- instructions are paused anyway, so the cost is only the ~20 tiny
 -- passes/s of follow_goal + jump_if between walks.
 npc.proc.register_program("npc:follow", {
-	{name = "npc:set_proc_interval", args = {value = 0.05}, srcmap = 35},
+	-- Initial pass interval: one pass per cell the leader crosses
+	-- (1 / leader's walk speed, 0.25 s at the 4 m/s default). Refined
+	-- per-leader on every pass by npc.nav.follow_goal (clamped
+	-- 0.1..0.5 s).
+	{name = "npc:set_proc_interval", args = {value = 0.25}, srcmap = 35},
 	{key = "@local.follow_goal", name = "npc:nav:follow_goal", args = {name = "@args.object", object = "@objs.get[@args.object]", mode = "@args.follow_mode", distance = "@args.follow_distance", lead = "@args.lead", catch_up = "@args.catch_up"}, srcmap = 36},
 	{name = "npc:jump_if", args = {expr = {left = "@local.follow_goal", op = "~=", right = nil}, offset = true, negate = true, pos = 2}, srcmap = 37}, -- IF [3],
 		{name = "npc:move:walk_to_cell_ll", args = {target_pos = "@local.follow_goal", door_close = "@args.door_close", speed = "@args.speed"}, srcmap = 38},
