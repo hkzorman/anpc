@@ -5020,8 +5020,13 @@ npc.do_step = function(self, dtime, moveresult)
 			--minetest.log("[do_step] Current instruction: "..dump(instruction))
 			-- A Lua error here would otherwise escape the object step and
 			-- crash the whole server: log it and end this program instead.
-			local ok, err = pcall(function()
+			-- xpcall + traceback handler: capture the stack at the point of
+			-- the error (before the deep fast-path recursion unwinds), so a
+			-- "stack overflow" shows WHICH frames nested. (diagnostic)
+			local ok, err = xpcall(function()
 				_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
+			end, function(e)
+				return debug.traceback(tostring(e), 2)
 			end)
 			if not ok then
 				minetest.log("anpc| ["..tostring(self.npc_id).."] instruction '"
