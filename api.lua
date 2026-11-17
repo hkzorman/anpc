@@ -5023,6 +5023,11 @@ npc.do_step = function(self, dtime, moveresult)
 			-- xpcall + traceback handler: capture the stack at the point of
 			-- the error (before the deep fast-path recursion unwinds), so a
 			-- "stack overflow" shows WHICH frames nested. (diagnostic)
+			-- Capture the pause state before executing: the fast path can run
+			-- several instructions and park ON a breakpoint (setting
+			-- debug.pause); the advance below must not then step one past it,
+			-- or the IDE reads the wrong (often null) line and step-over breaks.
+			local was_paused = self.debug.pause == true
 			local ok, err = xpcall(function()
 				_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
 			end, function(e)
@@ -5034,11 +5039,14 @@ npc.do_step = function(self, dtime, moveresult)
 					..") raised: "..tostring(err))
 				self.process.current.instruction =
 					#program_table[self.process.current.name].instructions + 1
-			end
-            --minetest.log("Next 2")
-            if self.process.program_changed == false then
-                self.process.current.instruction = self.process.current.instruction + 1
-            else self.process.program_changed = false end
+			elseif self.debug.pause == true and was_paused == false then
+				-- The fast path ran up to a breakpoint and parked the pointer ON
+				-- it (debug.pause just set). Do not advance: the pre-check
+				-- re-sees it next step, and release_pause overrides this exact
+				-- slot so resume steps over it.
+			elseif self.process.program_changed == false then
+				self.process.current.instruction = self.process.current.instruction + 1
+			else self.process.program_changed = false end
 		end
 		
 		-- Update debug screen
