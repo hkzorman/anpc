@@ -880,62 +880,120 @@ _npc.proc.process_instruction = function(instruction, original_list_size, functi
 end
 
 npc.proc.register_program = function(name, raw_instruction_list, source_location)
+	-- Re-registration replaces the existing program in place (upsert).
+	-- The IDE uses this to save and reload code on a running server.
 	if program_table[name] ~= nil then
-		assert("Program with name "..name.." already exists")
-		return false
-	else
-		-- Interpret program queue
-		-- Convert if, for and while to index-jump instructions
-		local instruction_list = {}
-		local function_table = {}
-		-- This is zero-based as the initial instruction is always initial_instruction - 1
-		-- TODO: Really?
-		-- TODO: Seems like
-		local initial_instruction = 0
-		for i = 1, #raw_instruction_list do
-			-- The following instructions are only for internal use
-			--assert(raw_instruction_list[i].name ~= "npc:jump",
-				--"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
-			--assert(raw_instruction_list[i].name ~= "npc:jump_if",
-				--"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
-				"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
-				"Instruction 'npc:timer:instr:start' is only for internal use and cannot be explicitly invoked from a program.")
-			assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop",
-				"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
-
-			local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i],
-				#instruction_list + 1, function_table)
-			for j = 1, #instructions do
-				instruction_list[#instruction_list + 1] = instructions[j]
-			end
-
-			if is_function then
-				-- Count the number of instructions inside function
-				initial_instruction = initial_instruction + #instructions
-			end
-		end
-
-		if initial_instruction == 0 then initial_instruction = 1 end
-
-		program_table[name] = {
-			function_table = function_table,
-			initial_instruction = initial_instruction,
-			instructions = instruction_list
-		}
-		
-		minetest.log("Source location: "..dump(source_location))
-		
-		if source_location then
-			program_table[name]["source_file"] = source_location
-		end
-
-		minetest.log("Registered program "..dump(name).." with initial instruction: "..dump(initial_instruction)..":")
-
-		--minetest.log(dump(program_table[name]))
-		return true
+		program_table[name] = nil
 	end
+
+	-- Interpret program queue
+	-- Convert if, for and while to index-jump instructions
+	local instruction_list = {}
+	local function_table = {}
+	-- This is zero-based as the initial instruction is always initial_instruction - 1
+	-- TODO: Really?
+	-- TODO: Seems like
+	local initial_instruction = 0
+	for i = 1, #raw_instruction_list do
+		-- The following instructions are only for internal use
+		--assert(raw_instruction_list[i].name ~= "npc:jump",
+			--"Instruction 'npc:jump' is only for internal use and cannot be explicitly invoked from a program.")
+		--assert(raw_instruction_list[i].name ~= "npc:jump_if",
+			--"Instruction 'npc:jump_if' is only for internal use and cannot be explicitly invoked from a program.")
+		assert(raw_instruction_list[i].name ~= "npc:set_process_interval",
+			"Instruction 'npc:set_process_interval' is only for internal use and cannot be explicitly invoked from a program.")
+		assert(raw_instruction_list[i].name ~= "npc:timer:instr:start",
+			"Instruction 'npc:timer:instr:start' is only for internal use and cannot be explicitly invoked from a program.")
+		assert(raw_instruction_list[i].name ~= "npc:timer:instr:stop",
+			"Instruction 'npc:timer:instr:stop' is only for internal use and cannot be explicitly invoked from a program.")
+
+		local instructions, is_function = _npc.proc.process_instruction(raw_instruction_list[i],
+			#instruction_list + 1, function_table)
+		for j = 1, #instructions do
+			instruction_list[#instruction_list + 1] = instructions[j]
+		end
+
+		if is_function then
+			-- Count the number of instructions inside function
+			initial_instruction = initial_instruction + #instructions
+		end
+	end
+
+	if initial_instruction == 0 then initial_instruction = 1 end
+
+	program_table[name] = {
+		function_table = function_table,
+		initial_instruction = initial_instruction,
+		instructions = instruction_list
+	}
+
+	minetest.log("Source location: "..dump(source_location))
+
+	if source_location then
+		program_table[name]["source_file"] = source_location
+	end
+
+	minetest.log("Registered program "..dump(name).." with initial instruction: "..dump(initial_instruction)..":")
+
+	--minetest.log(dump(program_table[name]))
+	return true
+end
+
+-- Removes a registered program entirely (used by the IDE on delete).
+npc.proc.unregister_program = function(name)
+	if program_table[name] == nil then
+		return false
+	end
+	program_table[name] = nil
+	return true
+end
+
+-- Set or clear a breakpoint on one instruction of a registered program.
+-- instruction_index is 1-based into the program's instruction list; the
+-- IDE resolves source lines to indices via the instructions' srcmap stamps.
+npc.proc.set_breakpoint = function(name, instruction_index, enabled)
+	local program = program_table[name]
+	if program == nil or type(instruction_index) ~= "number"
+		or instruction_index < 1 or instruction_index > #program.instructions then
+		return false
+	end
+	local instruction = program.instructions[instruction_index]
+	instruction.pause = enabled and true or false
+	if not enabled then
+		instruction.override = false
+	end
+	return true
+end
+
+-- Clear all breakpoints of a program.
+npc.proc.clear_breakpoints = function(name)
+	local program = program_table[name]
+	if program == nil then
+		return false
+	end
+	for i = 1, #program.instructions do
+		program.instructions[i].pause = false
+		program.instructions[i].override = false
+	end
+	return true
+end
+
+-- List the breakpoint positions of a program as {index, srcmap} records.
+npc.proc.list_breakpoints = function(name)
+	local program = program_table[name]
+	if program == nil then
+		return {}
+	end
+	local breakpoints = {}
+	for i = 1, #program.instructions do
+		if program.instructions[i].pause == true then
+			breakpoints[#breakpoints + 1] = {
+				index = i,
+				srcmap = program.instructions[i].srcmap
+			}
+		end
+	end
+	return breakpoints
 end
 
 npc.proc.register_instruction = function(name, instruction)
