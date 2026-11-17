@@ -4630,11 +4630,11 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		end
 	end
 
-	-- Increase the current instruction before execution of program - on re-entry,
-	-- this will cause going to next instruction
-	if (name == "npc:execute") then
-		self.process.current.instruction = self.process.current.instruction + 1
-	end
+	-- npc:execute does NOT pre-advance the instruction pointer here:
+	-- the parent is parked in the queue still pointing at the call,
+	-- and resume_after_execute advances it exactly once on promotion.
+	-- (A pre-advance here plus the resume advance skipped the
+	-- instruction after every npc:execute since the queue rebuild.)
 
 	-- raw_args is forwarded so instructions that evaluate nested
 	-- arguments (npc:execute) can pass the same value the top-level
