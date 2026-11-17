@@ -2,7 +2,7 @@
 ## What is `anpc`?
 `anpc`, short for advanced NPCs or non-playable-character, is a Minetest mod that allows you to create animals, enemies (so-called mobs) and any other kind of computer-controlled character. `anpc` is the spiritual successor to my other mod, `advanced_npc`. `anpc` inherits the "computer-like" structure of entities in `advanced_npc`, but takes it to a whole new level.
 
-**NOTE** `anpc` is still on development. This is not even an alpha version - but close. The mod is very stable, but functionality is missing. This mod also doesn't contain any *real* playable content: you can fiddle around with the included `vegetarian.lua` NPC, which will be taken out of the release version of the mod.
+**NOTE** `anpc` is still on development. This is not even an alpha version - but close. The mod is very stable, but functionality is missing. This mod also doesn't contain any *real* playable content: the testing NPCs (vegetarian, torcherer, chest mover) live in the `test_utilities` folder of the `anpc-dev` mod.
 
 For more information about how to use `anpc`, please see [anpc_dev](https://github.com/hkzorman/anpc-dev)
 
@@ -51,16 +51,11 @@ And you may be asking again, why? Why build NPCs like a CPU? The idea of a progr
 If you are user and don't want to create any NPC and just play Minetest, you should use a mod that uses `anpc` to implement its mobs. Currently there are no mods that do that, but I will be developing one soon.
 
 ### Testing
-If you are really eager to test this out, the included `vegetarian.lua` is a testing grounds NPC. A couple of testing items are included that can let you play around with some features of `anpc`.
-* `Vegetarian Spawner`: use this to spawn the dull and boring vegetarian NPC. By himself, he will:
-  * Wander around and sometimes look at you or other objects around him
-  * When he gets hungry, he will find grass and eat it, until he's satisfied
-  * When it is night, he will try to find a bed and sleep on it
-* `Follower`: while having this in hand, punch a NPC with it. It will follow you wherever you go, until you punch him again.
-* `Feeder`: punch a NPC while having this in hand and he will go around searching for grass, even if he's not hungry.
-* `Jumper`: punch a NPC while having this in hand to make him jump
-* `Owner`: while having this in hand, punch a node. Then, punch a NPC. You will be giving him "ownership" of that node, e.g. their bed. When they go to sleep, they will search first for their "owned" bed.
-* `Walk-to-owned`: punch a NPC while having this in hand and he will walk to one of his "owned" nodes. Notice that you must first use the `Owner` item to give him an owned node.
+If you are really eager to test this out, the `anpc-dev` mod contains a `test_utilities` folder with testing NPCs and items that let you play around with some features of `anpc`:
+* `Vegetarian Spawner` (currently commented out): the dull and boring vegetarian NPC - wanders around, eats grass when hungry, sleeps in a bed at night.
+* `Torcherer Spawner`: spawns a torch-keeping NPC that looks for its bed, turns on torches at night and wanders by day.
+* `Chest Mover Spawner`: a one-shot NPC that moves all items from one chest to the other, through its own inventory.
+* `Spawner` (`anpc_dev:npc_spawner`), `Follow (test)`, `Punch (test)` and `Inventory test` (`anpc_dev:inv_test_item`): click-based debug items for anpc engine NPCs (follow the player, punch the player, stock/inspect the NPC's inventory).
 
 
 ## OK, I actually want to create a NPC. What should I do?

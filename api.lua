@@ -5,6 +5,7 @@ local _npc = {
 	proc  = {},
 	env   = {},
 	obj	  = {},
+	inv   = {},
 	move  = {},
 	model = {},
 	follow_speed_logged = false
@@ -12,6 +13,7 @@ local _npc = {
 
 npc.model = _npc.model
 npc.obj = _npc.obj
+npc.inv = _npc.inv
 
 npc.ANIMATION_STAND_START = 0
 npc.ANIMATION_STAND_END = 79
@@ -319,6 +321,19 @@ _npc.dsl.set_var = function(self, key, value, userdata_type, storage_type)
 	if not userdata_type then userdata_type = "object" end
 	
 	if type(value) == "userdata" then
+		-- ItemStack results (npc:inv:get / put / take_from) are stored
+		-- as itemstrings: the object tracking path below calls
+		-- :is_player(), which ItemStacks don't have, and raw stacks
+		-- are not serializable (they crash get_staticdata). The
+		-- "name count" form is parsed back by _npc.inv.to_stack on use.
+		if _npc.inv.is_stack(value) then
+			if subkey and type(storage[key]) == "table" then
+				storage[key][subkey] = value:to_string()
+			else
+				storage[key] = value:to_string()
+			end
+			return
+		end
 		if userdata_type then
 			if userdata_type == "object" then
 				local tracking_record = _npc.dsl.generate_tracking_record(self, value)
@@ -1038,7 +1053,9 @@ npc.proc.register_instruction("npc:jump", function(self, args)
 		self.process.current.instruction = args.pos
 	end
 
-	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name][self.process.current.instruction]))
+	-- NOTE: program_table[name] is the program record; the instruction
+	-- LIVES in .instructions (indexing the record itself yields nil).
+	minetest.log("Jumping to instruction: "..dump(program_table[self.process.current.name].instructions[self.process.current.instruction]))
 end)
 
 npc.proc.register_instruction("npc:jump_if", function(self, args)
@@ -2195,6 +2212,602 @@ end
 npc.proc.register_instruction("npc:obj:punch", _npc.obj.punch)
 
 -- TODO: get_acceleration
+
+-----------------------------------------------------------------------------------
+-- Inventory (npc.inv)
+-----------------------------------------------------------------------------------
+-- Every NPC gets a real engine inventory: a detached inventory
+-- (minetest.create_detached_inventory), the same InvRef type players
+-- and node containers (chests) use. Detached inventories are
+-- RAM-only, so the item data is persisted in self.data.inv (saved with
+-- the rest of the NPC data by npc.get_staticdata), the RAM copy is
+-- (re)created on activation and dropped in npc.on_deactivate.
+--
+-- Lists (mirroring the player layout):
+--   main: 32 slots (the player default)
+--   hand: 1 slot - the NPC's held item. Data (npc:inv:wield /
+--          npc:inv:hand, and the future punch-with-hand-item) and
+--          rendered: npc.inv.update_wield mirrors it into a
+--          wielditem-visual child entity attached to the NPC's arm
+--          bone (the wield3d pattern - ObjectRef:set_wielded_item is
+--          player-only, verified by probe on 5.18).
+--
+-- The held item's visibility is a transient render proxy, rendered
+-- like a dropped item (the engine's item_entity works the same way):
+-- it is NOT saved (static_save = false) and NOT pointable; it is
+-- recreated by npc.inv.update_wield on every activation and removed
+-- when the hand empties or the NPC deactivates. The hand list is the
+-- source of truth.
+minetest.register_entity("anpc:wield_visual", {
+	initial_properties = {
+		physical = false,
+		collide_with_objects = false,
+		pointable = false,
+		static_save = false,
+		visual = "wielditem",
+		textures = {""},
+		visual_size = {x = 0.25, y = 0.25},
+		-- Invisible until npc.inv.update_wield configures it (spawn
+		-- and configure happen in the same tick).
+		is_visible = false,
+	},
+	on_step = function(self, dtime)
+		-- Self-clean if ever left unattached: the owner removes us in
+		-- npc.on_deactivate, this is the backstop.
+		if self.object:get_attach() == nil then
+			self.object:remove()
+		end
+	end,
+})
+
+-- Attach parameters for the render proxy. set_attach positions are in
+-- MODEL units (10 units = 1 node, like model dimensions - see the
+-- doc "Attachments" note); rotations in degrees. Defaults are the
+-- wield3d hand values, tuned for the standard character rig - this
+-- model has the same Arm_Left/Arm_Right/Head/Leg_* bones.
+_npc.inv.wield_defaults = {
+	bone = {right = "Arm_Right", left = "Arm_Left"},
+	pos = {x = 0, y = 5.5, z = 3},
+	rot = {x = -90, y = 225, z = 90},
+	scale = 0.25,
+}
+
+-- Per-item overrides: npc.inv.wield_locations["<itemname>"] =
+-- {bone = ..., pos = ..., rot = ..., scale = ...} (any subset; missing
+-- fields fall back to the defaults above). Public so other mods can
+-- tune how specific items are held.
+npc.inv.wield_locations = {}
+
+-- (Re)create the NPC's detached inventory from the persisted snapshot
+-- and run the hand sync. Called from npc.on_activate.
+npc.inv.init = function(self)
+	local inv_data = self.data.inv
+	if inv_data == nil or inv_data.uid == nil then
+		-- First time: a uid that stays stable across dormancy cycles.
+		inv_data = {uid = "anpc:inv:" .. tostring(math.random(100000, 999999))}
+		self.data.inv = inv_data
+	end
+	-- Detached inventories do not survive a restart: recreate (clears
+	-- any existing one) and hydrate from the snapshot.
+	minetest.create_detached_inventory(inv_data.uid, nil)
+	local inv = minetest.get_inventory({type = "detached", name = inv_data.uid})
+	if inv == nil then
+		minetest.log("[anpc] inventory init failed for " .. inv_data.uid)
+		return
+	end
+	inv:set_size("main", 32)
+	inv:set_size("hand", 1)
+	for i, s in ipairs(inv_data.main or {}) do
+		local stk = _npc.inv.to_stack(s)
+		if stk ~= nil then
+			inv:set_stack("main", i, stk)
+		end
+	end
+	for i, s in ipairs(inv_data.hand or {}) do
+		local stk = _npc.inv.to_stack(s)
+		if stk ~= nil then
+			inv:set_stack("hand", i, stk)
+		end
+	end
+	npc.inv.update_wield(self)
+end
+
+-- The NPC's own live InvRef (nil before npc.inv.init ran).
+npc.inv.get = function(self)
+	local inv_data = self.data.inv
+	if inv_data == nil or inv_data.uid == nil then
+		return nil
+	end
+	return minetest.get_inventory({type = "detached", name = inv_data.uid})
+end
+
+-- Copy the live inventory into self.data.inv (the persisted snapshot).
+npc.inv.snapshot = function(self)
+	local inv_data = self.data.inv
+	if inv_data == nil then
+		return
+	end
+	local inv = npc.inv.get(self)
+	if inv == nil then
+		return
+	end
+	local function dump_list(list)
+		local out = {}
+		local slots = inv:get_list(list)
+		if slots ~= nil then
+			for i = 1, #slots do
+				local s = slots[i]
+				if s ~= nil and not s:is_empty() then
+					out[i] = s:to_string()
+				else
+					out[i] = ""
+				end
+			end
+		end
+		return out
+	end
+	inv_data.main = dump_list("main")
+	inv_data.hand = dump_list("hand")
+end
+
+-- Sync the "hand" list's item to the visible render proxy
+-- (anpc:wield_visual). Spawn-on-demand / remove-on-empty: the proxy
+-- exists only while the hand holds something. Called from
+-- npc.inv.init and from every instruction that can change the hand
+-- list (put, remove, take_from, wield).
+npc.inv.update_wield = function(self)
+	local child = self.wield_visual
+	if child ~= nil and not child:is_valid() then
+		child = nil
+		self.wield_visual = nil
+	end
+
+	local stack = nil
+	local inv = npc.inv.get(self)
+	if inv ~= nil then
+		stack = inv:get_stack("hand", 1)
+	end
+	if stack == nil or stack:is_empty() then
+		-- Hand empty: drop the proxy.
+		if child ~= nil then
+			child:remove()
+		end
+		self.wield_visual = nil
+		self.wield_item_name = nil
+		return
+	end
+
+	local itemname = _npc.inv.item_name(stack)
+	if itemname == nil then
+		return
+	end
+	if child == nil then
+		child = minetest.add_entity(self.object:get_pos(), "anpc:wield_visual")
+		if child == nil then
+			return
+		end
+		self.wield_visual = child
+	end
+
+	-- Resolve the attach params: per-item override first, then the
+	-- defaults; the bone follows the NPC's handedness (data.global.
+	-- handedness, "left" | "right").
+	local handedness = self.data.global.handedness
+	local ov = npc.inv.wield_locations[itemname] or {}
+	local bone = ov.bone or _npc.inv.wield_defaults.bone[handedness]
+		or _npc.inv.wield_defaults.bone.right
+	local pos = ov.pos or _npc.inv.wield_defaults.pos
+	local rot = ov.rot or _npc.inv.wield_defaults.rot
+	local scale = ov.scale or _npc.inv.wield_defaults.scale
+
+	-- Re-attach on every sync: cheap, and correct after a handedness
+	-- override changes the bone mid-life.
+	child:set_attach(self.object, bone, pos, rot)
+
+	-- Re-texture only when the item actually changed.
+	if self.wield_item_name ~= itemname then
+		child:set_properties({
+			is_visible = true,
+			textures = {itemname},
+			-- The full itemstring carries ColorString/palette tinting
+			-- (the same pair the engine's item_entity sets).
+			wield_item = stack:to_string(),
+			visual_size = {x = scale, y = scale},
+		})
+		self.wield_item_name = itemname
+	end
+end
+
+-- Resolve the inventory an npc:inv:* instruction acts on: the NPC's
+-- own by default; args.pos -> a node inventory (chest, etc.);
+-- args.player -> a player inventory.
+_npc.inv.resolve_inv = function(self, args)
+	if args ~= nil and args.pos ~= nil then
+		return minetest.get_inventory({type = "node", pos = args.pos})
+	end
+	if args ~= nil and type(args.player) == "string" and args.player ~= "" then
+		return minetest.get_inventory({type = "player", name = args.player})
+	end
+	return npc.inv.get(self)
+end
+
+-- Is this userdata an ItemStack? (This build has no direct type check;
+-- probe: look up the methods through the metatable - plain indexing
+-- never errors, it just yields nil for non-stack userdata.)
+_npc.inv.is_stack = function(v)
+	return type(v) == "userdata"
+		and v.to_table ~= nil
+		and v.get_count ~= nil
+end
+
+-- Item argument -> ItemStack (accepts a program-local ItemStack or an
+-- itemstring: "default:wood", "default:wood 5" (this build's native
+-- to_string form) or "default:woodx5" (Minetest-style).
+-- This build's ItemStack(itemstring) does NOT parse a count - the whole
+-- string becomes the item name (probe: ItemStack("default:woodx5")
+-- -> {name = "default:woodx5", count = 1}) - so the count is split off
+-- here explicitly.
+_npc.inv.to_stack = function(v)
+	if v == nil then
+		return nil
+	end
+	if type(v) == "userdata" then
+		return v
+	end
+	if type(v) == "string" and v ~= "" then
+		local name, cnt = v:match("^(.+) (%d+)$")
+		if name == nil then
+			name, cnt = v:match("^(.+)x(%d+)$")
+		end
+		local stack
+		if name ~= nil then
+			stack = ItemStack(name)
+			if stack == nil or not stack:set_count(tonumber(cnt))
+					or stack:is_empty() then
+				return nil
+			end
+		else
+			stack = ItemStack(v)
+		end
+		if stack == nil or stack:is_empty() then
+			return nil
+		end
+		return stack
+	end
+	return nil
+end
+
+-- The clean item name of a stack (e.g. "default:wood"). Reads
+-- to_table().name: the registered item name, as opposed to the raw
+-- name a stack carries (which can be bogus, e.g. "default:woodx5",
+-- when built from an un-parsed itemstring - see to_stack).
+_npc.inv.item_name = function(stack)
+	local t = stack:to_table()
+	if t ~= nil and t.name ~= nil then
+		return t.name
+	end
+	return nil
+end
+
+-- Remove up to `count` items of `name` from `list` (nil count = as
+-- many as available). Slot scan + set_stack: this build's
+-- InvRef:remove_item is a no-op on detached inventories (probe:
+-- returns nil and leaves the list untouched, even for an exact-match
+-- itemstring), so the take is done explicitly. Returns the ItemStack
+-- actually removed (metadata of the first slot consumed), or nil.
+_npc.inv.remove_by_item = function(inv, list, name, count)
+	local slots = inv:get_list(list)
+	if slots == nil then
+		return nil
+	end
+	local removed
+	local remaining = count
+	for i = 1, #slots do
+		local s = slots[i]
+		if s ~= nil and not s:is_empty() and _npc.inv.item_name(s) == name then
+			local have = s:get_count()
+			local take = (remaining == nil or have < remaining) and have or remaining
+			if take > 0 then
+				if removed == nil then
+					removed = ItemStack(s:to_table())
+					removed:set_count(take)
+				else
+					removed:set_count(removed:get_count() + take)
+				end
+				if take >= have then
+					inv:set_stack(list, i, ItemStack())
+				else
+					s:set_count(have - take)
+					inv:set_stack(list, i, s)
+				end
+				if remaining ~= nil then
+					remaining = remaining - take
+					if remaining <= 0 then
+						break
+					end
+				end
+			end
+		end
+	end
+	if removed ~= nil and removed:is_empty() then
+		return nil
+	end
+	return removed
+end
+
+-- Can `count` (nil = at least 1) items of `name` be fully taken from
+-- `list`? Name-based, summed across slots. Slot scan on purpose: this
+-- build's InvRef:contains_item only matches an EXACT itemstring (name
+-- AND count), which is not useful (probe-verified).
+_npc.inv.contains = function(inv, list, name, count)
+	local slots = inv:get_list(list)
+	if slots == nil then
+		return nil
+	end
+	local want = (type(count) == "number" and count >= 1) and count or nil
+	local total = 0
+	for i = 1, #slots do
+		local s = slots[i]
+		if s ~= nil and not s:is_empty() and _npc.inv.item_name(s) == name then
+			total = total + s:get_count()
+			if want == nil then
+				return true
+			end
+			if total >= want then
+				return true
+			end
+		end
+	end
+	if want == nil then
+		return false
+	end
+	return total >= want
+end
+
+-- Read one slot: args.list (default "main"), args.index (1-based).
+-- Returns the ItemStack, or nil for an empty/missing slot.
+npc.proc.register_instruction("npc:inv:get", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil or args.index == nil then
+		return nil
+	end
+	local stack = inv:get_stack(args.list or "main", args.index)
+	if stack == nil or stack:is_empty() then
+		return nil
+	end
+	return stack
+end)
+
+-- Put an item into a slot. With args.index: replaces that slot and
+-- returns the displaced stack; without: add_item, returning the
+-- leftover. Returns nil when everything was placed.
+npc.proc.register_instruction("npc:inv:put", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil then
+		return nil
+	end
+	local stack = _npc.inv.to_stack(args.item)
+	if stack == nil then
+		return nil
+	end
+	local list = args.list or "main"
+	local result
+	if args.index ~= nil then
+		local cur = inv:get_stack(list, args.index)
+		inv:set_stack(list, args.index, stack)
+		if cur ~= nil and not cur:is_empty() then
+			result = cur
+		end
+	else
+		result = inv:add_item(list, stack)
+		if result ~= nil and result:is_empty() then
+			result = nil
+		end
+	end
+	if args.pos == nil and args.player == nil then
+		npc.inv.update_wield(self)
+	end
+	return result
+end)
+
+-- Remove items: by args.item (name/itemstring, optional args.count,
+-- matched anywhere in the list) or from one slot (args.index, optional
+-- args.count). Returns the ItemStack actually removed, or nil.
+npc.proc.register_instruction("npc:inv:remove", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil then
+		return nil
+	end
+	local list = args.list or "main"
+	local removed
+	if args.index ~= nil then
+		local cur = inv:get_stack(list, args.index)
+		if cur == nil or cur:is_empty() then
+			return nil
+		end
+		if type(args.count) == "number" and args.count >= 1
+				and args.count < cur:get_count() then
+			removed = ItemStack(cur:to_table())
+			removed:set_count(args.count)
+			cur:set_count(cur:get_count() - args.count)
+			inv:set_stack(list, args.index, cur)
+		else
+			removed = cur
+			inv:set_stack(list, args.index, ItemStack())
+		end
+	else
+		local stack = _npc.inv.to_stack(args.item)
+		if stack == nil then
+			return nil
+		end
+		local count = (type(args.count) == "number" and args.count >= 1)
+			and args.count or nil
+		removed = _npc.inv.remove_by_item(inv, list, _npc.inv.item_name(stack), count)
+	end
+	if removed == nil or removed:is_empty() then
+		return nil
+	end
+	if args.pos == nil and args.player == nil then
+		npc.inv.update_wield(self)
+	end
+	return removed
+end)
+
+-- Take from another inventory (a chest via args.pos, a player via
+-- args.player - the source must be explicit) into the NPC's own
+-- inventory (args.to, default "main"). Nothing is dropped: whatever
+-- does not fit is returned as .leftover for the caller to handle
+-- (dialogue, swap, drop later, ...). Returns
+-- {taken = <ItemStack>, leftover = <ItemStack or nil>}, or nil when
+-- nothing could be taken.
+npc.proc.register_instruction("npc:inv:take_from", function(self, args)
+	local src
+	if args.pos ~= nil then
+		src = minetest.get_inventory({type = "node", pos = args.pos})
+	elseif type(args.player) == "string" and args.player ~= "" then
+		src = minetest.get_inventory({type = "player", name = args.player})
+	end
+	if src == nil then
+		return nil
+	end
+	local slist = args.list or "main"
+	local taken
+	if args.index ~= nil then
+		local cur = src:get_stack(slist, args.index)
+		if cur == nil or cur:is_empty() then
+			return nil
+		end
+		if type(args.count) == "number" and args.count >= 1
+				and args.count < cur:get_count() then
+			taken = ItemStack(cur:to_table())
+			taken:set_count(args.count)
+			cur:set_count(cur:get_count() - args.count)
+			src:set_stack(slist, args.index, cur)
+		else
+			taken = cur
+			src:set_stack(slist, args.index, ItemStack())
+		end
+	else
+		local stack = _npc.inv.to_stack(args.item)
+		if stack == nil then
+			return nil
+		end
+		local count = (type(args.count) == "number" and args.count >= 1)
+			and args.count or nil
+		taken = _npc.inv.remove_by_item(src, slist, _npc.inv.item_name(stack), count)
+	end
+	if taken == nil or taken:is_empty() then
+		return nil
+	end
+
+	local own = npc.inv.get(self)
+	local leftover = nil
+	if own ~= nil then
+		local to = (type(args.to) == "string" and args.to ~= "") and args.to or "main"
+		leftover = own:add_item(to, taken)
+		if leftover ~= nil and leftover:is_empty() then
+			leftover = nil
+		end
+	end
+	npc.inv.update_wield(self)
+	return {taken = taken, leftover = leftover}
+end)
+
+-- List a list: returns an array of the non-empty ItemStacks (in slot
+-- order, trailing empty slots trimmed), or nil. Programs can use
+-- .length and [i] on the result.
+npc.proc.register_instruction("npc:inv:list", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil then
+		return nil
+	end
+	local slots = inv:get_list(args.list or "main")
+	if slots == nil then
+		return nil
+	end
+	local size = #slots
+	while size > 0 do
+		local s = slots[size]
+		if s ~= nil and not s:is_empty() then
+			break
+		end
+		size = size - 1
+	end
+	local out = {}
+	for i = 1, size do
+		local s = slots[i]
+		if s ~= nil and not s:is_empty() then
+			out[#out + 1] = s
+		end
+	end
+	return out
+end)
+
+-- Set (or clear, with no args.item) the NPC's held item: replaces the
+-- "hand" list's slot and syncs the engine's wielded item.
+npc.proc.register_instruction("npc:inv:wield", function(self, args)
+	local own = npc.inv.get(self)
+	if own == nil then
+		return false
+	end
+	own:set_stack("hand", 1, _npc.inv.to_stack(args.item) or ItemStack())
+	npc.inv.update_wield(self)
+	return true
+end)
+
+-- The NPC's held item (or nil).
+npc.proc.register_instruction("npc:inv:hand", function(self, args)
+	local own = npc.inv.get(self)
+	if own == nil then
+		return nil
+	end
+	local stack = own:get_stack("hand", 1)
+	if stack == nil or stack:is_empty() then
+		return nil
+	end
+	return stack
+end)
+
+-- Can args.item (or args.count of it, default: at least 1) be fully
+-- taken from the list? Name-based, summed across slots (see
+-- _npc.inv.contains for why this is a slot scan here).
+npc.proc.register_instruction("npc:inv:contains", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil then
+		return nil
+	end
+	local stack = _npc.inv.to_stack(args.item)
+	if stack == nil then
+		return nil
+	end
+	local name = _npc.inv.item_name(stack)
+	if name == nil then
+		return nil
+	end
+	return _npc.inv.contains(inv, args.list or "main", name, args.count)
+end)
+
+npc.proc.register_instruction("npc:inv:room_for", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil then
+		return nil
+	end
+	local stack = _npc.inv.to_stack(args.item)
+	if stack == nil then
+		return nil
+	end
+	return inv:room_for_item(args.list or "main", stack)
+end)
+
+-- Resize/create a list. Own inventory: e.g. grow "main". Node
+-- inventories have fixed sizes (set_size fails on them).
+npc.proc.register_instruction("npc:inv:size", function(self, args)
+	local inv = _npc.inv.resolve_inv(self, args)
+	if inv == nil or type(args.size) ~= "number" then
+		return nil
+	end
+	return inv:set_size(args.list or "main", args.size)
+end)
 
 -----------------------------------------------------------------------------------
 -- Movement instructions
@@ -4347,7 +4960,18 @@ npc.do_step = function(self, dtime, moveresult)
 			end
 			
 			--minetest.log("[do_step] Current instruction: "..dump(instruction))
-			_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
+			-- A Lua error here would otherwise escape the object step and
+			-- crash the whole server: log it and end this program instead.
+			local ok, err = pcall(function()
+				_npc.proc.execute_instruction(self, instruction.name, instruction.args, instruction.key)
+			end)
+			if not ok then
+				minetest.log("anpc| ["..tostring(self.npc_id).."] instruction '"
+					..tostring(instruction.name).."' (srcmap "..tostring(instruction.srcmap)
+					..") raised: "..tostring(err))
+				self.process.current.instruction =
+					#program_table[self.process.current.name].instructions + 1
+			end
             --minetest.log("Next 2")
             if self.process.program_changed == false then
                 self.process.current.instruction = self.process.current.instruction + 1
@@ -4360,6 +4984,24 @@ npc.do_step = function(self, dtime, moveresult)
 		end
 	end
 
+end
+
+-- Detached inventories are RAM-only: drop the working copy when the
+-- NPC deactivates (dormant or removed). The items themselves are safe
+-- - npc.get_staticdata snapshots them into self.data.inv before the
+-- object goes away.
+npc.on_deactivate = function(self, removal)
+	local inv_data = self.data.inv
+	if inv_data ~= nil and inv_data.uid ~= nil then
+		minetest.remove_detached_inventory(inv_data.uid)
+	end
+	-- Drop the transient wield-visual render proxy (the held item data
+	-- is already safe: npc.inv.snapshot ran in npc.get_staticdata).
+	local child = self.wield_visual
+	if child ~= nil and child:is_valid() then
+		child:remove()
+	end
+	self.wield_visual = nil
 end
 
 npc.on_activate = function(self, staticdata)
@@ -4463,6 +5105,50 @@ npc.on_activate = function(self, staticdata)
 
 	self.object:set_acceleration({x=0, y=-10, z=0})
 
+	-- Which hand the NPC holds items in: randomized once per NPC and
+	-- then persisted (self.data.global survives restarts), so an NPC
+	-- keeps its handedness across dormancy and reloads. Programs can
+	-- override it at any time - npc:var:set with storage "global", key
+	-- "handedness", value "left" or "right"; npc.inv.update_wield picks
+	-- the arm bone from it.
+	if self.data.global == nil then
+		self.data.global = {}
+	end
+	if self.data.global.handedness ~= "left"
+			and self.data.global.handedness ~= "right" then
+		self.data.global.handedness = (math.random() < 0.5) and "left" or "right"
+	end
+
+	-- (Re)create the inventory: the detached inventory is RAM-only, so
+	-- after any activation it is rebuilt from the snapshot in
+	-- self.data.inv.
+	npc.inv.init(self)
+
+end
+
+-- Recursively convert ItemStack userdata in serializable state to
+-- itemstrings before minetest.serialize: program locals may hold live
+-- stacks (npc:inv:* results), sometimes nested in tables (e.g. the
+-- npc:inv:list result), and serialize raises "unsupported type:
+-- userdata" on them. The itemstring form survives the round trip -
+-- _npc.inv.to_stack parses it back on activation.
+-- NOTE: must use the `local function` form - with `local x = function()`
+-- the recursive self-reference would resolve to a nil global (the local
+-- only enters scope after the statement).
+local function sanitize_inv_data(v, seen)
+	if type(v) == "table" then
+		if seen[v] ~= nil then
+			return v
+		end
+		seen[v] = true
+		for k, val in pairs(v) do
+			v[k] = sanitize_inv_data(val, seen)
+		end
+		return v
+	elseif _npc.inv.is_stack(v) then
+		return v:to_string()
+	end
+	return v
 end
 
 npc.get_staticdata = function(self)
@@ -4493,6 +5179,12 @@ npc.get_staticdata = function(self)
 		-- The navigation session holds live object references (and a
 		-- cached path), which are not serializable - drop it.
 		self.data.nav = {}
+		-- Snapshot the live (RAM-only) inventory before serializing;
+		-- the RAM copy is dropped in npc.on_deactivate.
+		npc.inv.snapshot(self)
+		-- Convert any live ItemStacks left in program locals to
+		-- itemstrings (minetest.serialize cannot store userdata).
+		sanitize_inv_data(self.data, {})
 		result = result..minetest.serialize(self.data).."|"
 	end
 	
@@ -4677,109 +5369,10 @@ npc.proc.register_instruction("npc:nav:follow_goal", function(self, args)
 	return npc.nav.follow_goal(self, args)
 end)
 
----------------------------------------------------------------------
--- WARNING: Below are stuff for testing. Remove from final version
--- 		    of mod
----------------------------------------------------------------------
-
-minetest.register_craftitem("anpc:npc_spawner", {
-	description = "Spawner",
-	inventory_image = "default_apple.png",
-	on_use = function(itemstack, user, pointed_thing)
-		local spawn_pos = minetest.pointed_thing_to_face_pos(user, pointed_thing)
-		spawn_pos.y = spawn_pos.y
-		local entity = minetest.add_entity(spawn_pos, "anpc:npc")
-		if entity then
-			npc.proc.set_state_process(entity:get_luaentity(), "builtin:idle", {
-				ack_nearby_objs = true,
-				ack_nearby_objs_dist = 4,
-				ack_nearby_objs_chance = 50
-			})
-		else
-			minetest.remove_entity(entity)
-		end
-	end
-})
-
--- Follow test item: left-click an anpc NPC with it to make that NPC
--- follow the clicking player (runs the "npc:follow" state process,
--- block-middle walking, 2 cells behind, walking speed = the
--- player's walk speed minus 0.25 m/s with catch-up at 4 cells,
--- immediate door closing).
--- Left-click the same NPC with it again to stop following and
--- restore the NPC's previous state process. Only works on engine
--- NPCs (the pointed object must have the proc machinery).
-minetest.register_craftitem("anpc:follow_item", {
-	description = "Follow (test)",
-	inventory_image = "default_footprint.png",
-	on_use = function(itemstack, user, pointed_thing)
-		if user == nil or pointed_thing == nil
-			or pointed_thing.type ~= "object" then
-			return itemstack
-		end
-		local npc_ent = pointed_thing.ref:get_luaentity()
-		-- Only engine NPCs: they have the data/process tables set up
-		-- in npc.on_activate.
-		if npc_ent == nil or npc_ent.data == nil
-			or npc_ent.process == nil or npc_ent.process.state == nil then
-			return itemstack
-		end
-		local state = npc_ent.process.state
-		if state.name == "npc:follow" then
-			-- Stop following: restore the previous state process.
-			local prev = npc_ent.data.follow_prev_state
-			npc_ent.data.follow_prev_state = nil
-			if prev ~= nil and prev.name ~= nil then
-				npc.proc.set_state_process(npc_ent, prev.name, prev.args, true)
-			end
-		else
-			-- Start following the clicking player. The leader is
-			-- resolved by player name each pass (@objs.get in the
-			-- npc:follow program), so the NPC tracks the player even
-			-- while the goal cell stays static for one walk.
-			npc_ent.data.follow_prev_state = {
-				name = state.name,
-				args = state.args,
-			}
-			npc.proc.set_state_process(npc_ent, "npc:follow", {
-				object = user:get_player_name(),
-				follow_mode = "behind",
-				follow_distance = 2,
-			}, true)
-		end
-		return itemstack
-	end
-})
-
--- Punch test item: left-click an anpc NPC with it to make that NPC
--- punch the clicking player (5 m reach, so it works from a normal
--- click distance; the swing plays the model's mine_once animation
--- until a real "punch" animation is registered). Only works on
--- engine NPCs (the pointed object must have the proc machinery).
--- The result status is logged on the server.
-minetest.register_craftitem("anpc:punch_item", {
-	description = "Punch (test)",
-	inventory_image = "default_bow.png",
-	on_use = function(itemstack, user, pointed_thing)
-		if user == nil or pointed_thing == nil
-			or pointed_thing.type ~= "object" then
-			return itemstack
-		end
-		local npc_ent = pointed_thing.ref:get_luaentity()
-		-- Only engine NPCs: they have the data/process tables set up
-		-- in npc.on_activate.
-		if npc_ent == nil or npc_ent.data == nil
-			or npc_ent.process == nil or npc_ent.process.state == nil then
-			return itemstack
-		end
-		local result = _npc.obj.punch(npc_ent, {
-			name = user:get_player_name(),
-			max_reach = 5,
-		})
-		minetest.log("[anpc] punch test: " .. tostring(result))
-		return itemstack
-	end
-})
+-- Test/debug utility items (anpc:npc_spawner, anpc:follow_item,
+-- anpc:punch_item, anpc:inv_test_item) were extracted from this file
+-- during the test-code cleanup; they now live in
+-- anpc-dev/test_utilities/debug_items.lua.
 
 -- Node registrations live in the per-game files under nodes/
 -- (e.g. nodes/minetest_game.lua), loaded by init.lua. The engine
