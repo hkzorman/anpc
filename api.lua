@@ -11,6 +11,7 @@ local _npc = {
 }
 
 npc.model = _npc.model
+npc.obj = _npc.obj
 
 npc.ANIMATION_STAND_START = 0
 npc.ANIMATION_STAND_END = 79
@@ -27,6 +28,7 @@ local program_table = {}
 local instruction_table = {}
 local hl_task_table = {}
 local node_table = {}
+local entity_table = {}
 local node_group_name_map = {}
 local group_to_pos_map = {}
 
@@ -976,6 +978,22 @@ npc.env.register_node = function(name, groups, properties, operation)
 end
 
 -- Parameters:
+-- name: Name of the entity, same as when the entity is registered with
+--       'minetest.register_entity' (for players: the player name)
+-- callbacks: A table of optional callbacks:
+--   on_punch: function(self, target, args)
+--     Called after the 'npc:obj:punch' instruction fires a punch at an
+--     object of this type. self is the punching NPC, target the
+--     punched object, args the punch instruction's arguments.
+npc.obj.register_entity = function(name, callbacks)
+	if entity_table[name] ~= nil then
+		return false
+	end
+	entity_table[name] = callbacks
+	return true
+end
+
+-- Parameters:
 -- The "animation_name" parameter is the name of the animation
 -- The object "animation_params" is like this:
 -- {
@@ -1090,7 +1108,7 @@ npc.proc.register_instruction("npc:return", function(self, args)
 
 end)
 
-npc.proc.register_instruction("npc:execute", function(self, args)
+npc.proc.register_instruction("npc:execute", function(self, args, raw_args)
 	local processed_args = {}
 	if args.args then
 		for arg_key,arg_value in pairs(args.args) do
@@ -1451,13 +1469,16 @@ end
 -- with nodes like air, grass and stairs.
 _npc.env.node_is_walkable = function(self, args)
 	local node = minetest.get_node_or_nil(args.pos)
-	if (node and node.name
-		and (
-			minetest.registered_nodes[node.name].walkable == false
-			or minetest.get_item_group(next_node_below.name, "stair") > 0
-			or minetest.get_item_group(next_node_below.name, "slab") > 0
-		)) then
-		return true
+	if node and node.name and minetest.registered_nodes[node.name] then
+		-- The node it stands on: a stair/slab incline counts as
+		-- walkable even when the node above it is not.
+		local below = minetest.get_node_or_nil({x = args.pos.x, y = args.pos.y - 1, z = args.pos.z})
+		if (minetest.registered_nodes[node.name].walkable == false
+			or (below and minetest.get_item_group(below.name, "stair") > 0)
+			or (below and minetest.get_item_group(below.name, "slab") > 0)
+		) then
+			return true
+		end
 	end
 	return false
 end
@@ -2039,6 +2060,140 @@ npc.proc.register_instruction("npc:obj:get_velocity", function(self, args)
 	end
 end)
 
+npc.proc.register_instruction("npc:obj:get_hp", function(self, args)
+	local obj = args.object
+	if obj and type(obj) == "userdata" then
+		return obj:get_hp()
+	else
+		return nil
+	end
+end)
+
+-- Resolve an interact target: a direct object reference (userdata)
+-- wins; otherwise a name, resolved like the follow leader (player
+-- first, then the environment object table by name).
+_npc.obj.resolve_target = function(self, args)
+	if args.object ~= nil and type(args.object) == "userdata" then
+		return args.object
+	end
+	if type(args.name) == "string" and args.name ~= "" then
+		return npc.nav.follow_leader(self, args.name)
+	end
+	return nil
+end
+
+-- Punch (attack) an object: the entity-side mirror of the node
+-- interactions (npc:env:node:operate / node:dig). Fires the engine
+-- punch (ObjectRef:punch), which applies the damage, calls the
+-- target's on_punch callback and handles death; the instruction
+-- itself faces the target, plays the swing animation and enforces a
+-- per-NPC punch cooldown. Velocity is untouched - a program that
+-- wants stand-and-punch does npc:move:stand first (like node:dig).
+--
+-- Arguments:
+--   object: ObjectRef of the target (e.g. from @objs.get[...])
+--   name:   target name, player or entity (alternative to object)
+--   max_reach: punch reach in m (default 2)
+--   interval: seconds between punches (default 0.7)
+--   damage: damage dealt by a full-strength punch (default 1)
+--   damage_group: target damage group the damage applies to
+--                 (default "fleshy" - the group players belong to)
+--   animation: swing animation (default "punch"; falls back to
+--              "mine_once" when the model has no "punch")
+--   sound: sound name to play at the NPC (optional)
+-- Returns: "punched" | "cooldown" | "out_of_reach" | "no_target"
+_npc.obj.punch = function(self, args)
+	local target = _npc.obj.resolve_target(self, args)
+	if target == nil or target:get_pos() == nil then
+		-- A stale reference (removed or dormant) reports a nil pos;
+		-- this build has no ObjectRef:is_gone(). (Players have no
+		-- LuaEntity, so the NPC-side liveness guard does not apply
+		-- to targets.)
+		return "no_target"
+	end
+
+	local self_pos = self.object:get_pos()
+	local target_pos = target:get_pos()
+	local max_reach = (type(args.max_reach) == "number" and args.max_reach > 0)
+		and args.max_reach or 2
+	if vector.distance(self_pos, target_pos) > max_reach then
+		return "out_of_reach"
+	end
+
+	local interval = (type(args.interval) == "number" and args.interval > 0)
+		and args.interval or 0.7
+	local damage = (type(args.damage) == "number" and args.damage > 0)
+		and args.damage or 1
+	local dgroup = (type(args.damage_group) == "string" and args.damage_group ~= "")
+		and args.damage_group or "fleshy"
+	local now = self.data.env.time or 0
+	local last = self.data.env.last_punch
+	if last ~= nil and now - last < interval then
+		return "cooldown"
+	end
+	self.data.env.last_punch = now
+
+	-- Face the target before the swing.
+	self.object:set_yaw(minetest.dir_to_yaw(vector.direction(self_pos, target_pos)))
+
+	-- Swing animation: a discrete action, so re-applying it restarts
+	-- the cycle on purpose (raw set_animation, not
+	-- set_animation_once). The bookkeeping is updated manually so the
+	-- swing's animation_after callback (stand) still re-sends after
+	-- this raw call.
+	local anim = (type(args.animation) == "string" and args.animation ~= "")
+		and args.animation or "punch"
+	if _npc.model.set_animation(self, {name = anim}) == false then
+		anim = "mine_once"
+		_npc.model.set_animation(self, {name = anim})
+	end
+	self.data.animation = anim
+	self.data.animation_speed = 0
+
+	-- Fire the punch (the mobs-mod melee pattern): the engine
+	-- applies damage through the target's damage groups - an empty
+	-- tool_capabilities table deals no damage to players, so the
+	-- caps carry the punch strength. time_from_last_punch >= the
+	-- full_punch_interval means a full-strength punch (the cooldown
+	-- above guarantees the elapsed time reaches the interval; the
+	-- first punch is reported as a full interval).
+	target:punch(self.object, last or interval,
+		{full_punch_interval = interval,
+		 damage_groups = {[dgroup] = damage}},
+		vector.direction(self_pos, target_pos))
+
+	-- Per-entity-type hook (npc.obj.register_entity). This build's
+	-- ObjectRef has no get_name(): the entity name lives on the
+	-- luaentity (nil for players); players use get_player_name().
+	local tname
+	local le = target:get_luaentity()
+	if le ~= nil and le.name ~= nil then
+		tname = le.name
+	else
+		local pname = target:get_player_name()
+		if pname ~= "" then
+			tname = pname
+		end
+	end
+	if tname ~= nil then
+		local hook = entity_table[tname]
+		if hook ~= nil and hook.on_punch ~= nil then
+			hook.on_punch(self, target, args)
+		end
+	end
+
+	if type(args.sound) == "string" and args.sound ~= "" then
+		minetest.sound_play(args.sound, {
+			max_hear_distance = 10,
+			object = self.object
+		})
+	end
+
+	return "punched"
+end
+
+npc.proc.register_instruction("npc:obj:punch", _npc.obj.punch)
+
 -- TODO: get_acceleration
 
 -----------------------------------------------------------------------------------
@@ -2413,17 +2568,15 @@ end
 
 -- Plan a decorated path from the NPC's current cell to trgt_pos.
 -- Returns the path, or nil.
+--
+-- Note: the entity's `stepheight` property is deliberately NOT toggled
+-- around the search: the pathfinder never reads it (step-up/down
+-- capability comes from the entity's jump_height / fear_height fields,
+-- see pathfinder.lua). Toggling it was pure overhead, and if the
+-- search raised the entity would be left with stepheight = 1.
 function npc.nav._find_path(self, trgt_pos)
-	-- For the purposes of the pathfinder - we assume stepheight = 1.
-	-- TODO: make this configurable. What if we want more than just 1 because
-	-- we have a bigger-than-two-nodes NPC?
-	-- (Keep the original value so we don't hardcode the per-entity default.)
 	local self_pos = vector.round(self.object:get_pos())
-	local prev_stepheight = self.object:get_properties().stepheight or 0.6
-	self.object:set_properties({stepheight = 1})
-	local path = npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
-	self.object:set_properties({stepheight = prev_stepheight})
-	return path
+	return npc.pathfinder.find_path(self_pos, trgt_pos, self, true)
 end
 
 -- Axis-wise sign (-1, 0, 1); math.sign is not available here.
@@ -2513,6 +2666,26 @@ do
 		"[anpc] engine movement_speed_walk = %s", tostring(ws)))
 end
 
+-- The names an object answers to: the luaentity's own name field
+-- (the entity registration name, the same convention
+-- npc.obj.register_entity hooks use) and, for anpc NPCs, the display
+-- name their program keeps in data.global (e.g. "Torcherer", set by
+-- the init program). This build's ObjectRef has no get_name().
+local function object_matches_name(o, name)
+	local le = o:get_luaentity()
+	if le == nil then
+		return false
+	end
+	if le.name == name then
+		return true
+	end
+	if le.data ~= nil and le.data.global ~= nil
+		and le.data.global.name == name then
+		return true
+	end
+	return false
+end
+
 -- Resolve the follow leader by name. Players first (no range limit),
 -- then the tracked nearby objects (an NPC leader). Returns an
 -- ObjectRef or nil.
@@ -2526,8 +2699,9 @@ function npc.nav.follow_leader(self, name)
 	end
 	local objects = self.data.env.objects
 	for i = 1, #objects do
+		-- Players are matched above by get_player_by_name.
 		local o = objects[i]
-		if o ~= nil and o.get_name ~= nil and o:get_name() == name then
+		if o ~= nil and object_matches_name(o, name) then
 			return o
 		end
 	end
@@ -3719,15 +3893,13 @@ end)
 -----------------------------------------------------------------------------------
 npc.proc.execute_program = function(self, name, args)
 	assert(program_table[name] ~= nil, "Program with name '"..name.."' is not a registered program")
-	-- Enqueue process - this is a priority enqueue
+	-- Priority enqueue. The queue is a dense 1-based array (queue[1] is
+	-- the next program to run), so insert at the front and shift the
+	-- rest one slot right.
+	local queue = self.process.queue
 	local tail = self.process.queue_tail
-	local head = self.process.queue_head
-	if self.process.queue_tail < self.process.queue_head then
-		tail = self.process.queue_head
-		head = self.process.queue_tail
-	end
-	for i = tail + 1, head + 1, -1 do
-		self.process.queue[i] = self.process.queue[i - 1]
+	for i = tail, 1, -1 do
+		queue[i + 1] = queue[i]
 	end
 
 	-- Pre-process program arguments - userdata arguments cause crashes!
@@ -3739,34 +3911,37 @@ npc.proc.execute_program = function(self, name, args)
 		end
 	end
 
-	self.process.queue_tail = self.process.queue_tail + 1
-	self.process.queue[self.process.queue_head] = {
+	queue[1] = {
 		id = self.process.key,
 		name = name,
 		args = args,
 		instruction = 1--program_table[name].initial_instruction
 	}
+	self.process.queue_tail = tail + 1
 
-	-- TODO: Key is 100, but queue_head = 1. It happened.
-	self.process.key = (self.process.key + 1) % 100
+	-- Process IDs are unique, ever-increasing: locals live in
+	-- self.data.proc[id], so a wrapped key could collide with a
+	-- still-live process and clobber its locals/timers/call stack.
+	self.process.key = self.process.key + 1
 
-	self.process.current = self.process.queue[self.process.queue_head]
+	self.process.current = queue[1]
 end
 
 npc.proc.enqueue_program = function(self, name, args)
-
-	local next_tail = (self.process.queue_tail + 1) % 100
-	if next_tail == 0 then next_tail = 1 end
-	self.process.queue_tail = next_tail
-	self.process.queue[self.process.queue_tail] = {
+	-- Append to the dense queue (queue[1] is the next program to run,
+	-- queue_tail its length), so a full queue can't clobber or lose
+	-- live entries.
+	local queue = self.process.queue
+	local tail = self.process.queue_tail + 1
+	queue[tail] = {
 		id = self.process.key,
 		name = name,
 		args = args,
 		instruction = 1--program_table[name].initial_instruction
 	}
+	self.process.queue_tail = tail
 
-	-- TODO: Key is 100, but queue_head = 1. It happened.
-	self.process.key = (self.process.key + 1) % 100
+	self.process.key = self.process.key + 1
 end
 
 _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
@@ -3790,7 +3965,11 @@ _npc.proc.execute_instruction = function(self, name, raw_args, result_key)
 		self.process.current.instruction = self.process.current.instruction + 1
 	end
 
-	local result = instruction_table[name](self, processed_args)
+	-- raw_args is forwarded so instructions that evaluate nested
+	-- arguments (npc:execute) can pass the same value the top-level
+	-- loop above passes to evaluate_argument. Other instructions
+	-- ignore it.
+	local result = instruction_table[name](self, processed_args, raw_args)
 	if (result_key) then
 		--minetest.log("Instruction returned: "..dump(result))
 		--minetest.log("This is the result_key: "..dump(result_key))
@@ -3884,28 +4063,9 @@ npc.proc.execute_ll_task = function(self, name, args)
 	self.timers.hl_task_value = 0
 end
 
-npc.proc.enqueue_process = function(self, name, args)
-	-- Enqueue process
-	self.process.queue[self.process.queue_tail] = {
-		id = self.process.key,
-		name = name,
-		args = args,
-		instruction = program_table[name].initial_instruction
-	}
-
-	-- TODO: Key is 100, but queue_head = 1. It happened.
-	self.process.key = (self.process.key + 1) % 100
-
-	local next_tail = (self.process.queue_tail + 1) % 100
-	if next_tail == 0 then next_tail = 1 end
-	self.process.queue_tail = next_tail
-
-	-- If current process is state process, execute the new process immediately
-	-- TODO: Check if this actually works
-	if self.process.current.name == self.process.state.name then
-		self.process.current = self.process.queue[self.process.queue_head]
-	end
-end
+-- Legacy alias: superseded by enqueue_program (the old variant used a
+-- different queue convention and pre-dates the dense queue layout).
+npc.proc.enqueue_process = npc.proc.enqueue_program
 
 npc.proc.set_state_process = function(self, name, args, clear_queue)
 	self.process.state.id = self.process.key
@@ -3924,7 +4084,7 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 
 	if (clear_queue == true) then
 		self.process.queue_head = 1
-		self.process.queue_tail = 1
+		self.process.queue_tail = 0
 		self.process.queue = {}
 		-- Clear current process, that way, state process should be picked
 		self.process.current = {}
@@ -3932,9 +4092,7 @@ npc.proc.set_state_process = function(self, name, args, clear_queue)
 	
 	self.process.program_changed = true
 
-	-- TODO: Key is 100, but queue_head = 1. It happened.
-	-- This is probably fixed already by new queue logic
-	self.process.key = (self.process.key + 1) % 100
+	self.process.key = self.process.key + 1
 end	
 
 -----------------------------------------------------------------------------------
@@ -3942,6 +4100,17 @@ end
 -- Lua Entity Callbacks															 --
 -----------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------
+-- A program paused on npc:execute (called_execute) resumes at the
+-- instruction after the call; re-executing the call would spawn the
+-- child again and stall the rest of the queue behind it forever.
+local function resume_after_execute(process)
+	local current = process.current
+	if current.called_execute == true then
+		current.instruction = current.instruction + 1
+		current.called_execute = false
+	end
+end
+
 npc.do_step = function(self, dtime, moveresult)
 	-- Keep the latest moveresult around so that low-latency tasks (e.g. the
 	-- jump landing check) can inspect the collision info of this step.
@@ -3959,6 +4128,10 @@ npc.do_step = function(self, dtime, moveresult)
 	self.timers.node_below_value = self.timers.node_below_value + dtime
 	self.timers.objects_value = self.timers.objects_value + dtime
 	self.timers.proc_value = self.timers.proc_value + dtime
+	-- Internal mission clock (seconds since activation): this build
+	-- has no minetest.get_time(); used for action cooldowns
+	-- (e.g. npc:obj:punch).
+	self.data.env.time = (self.data.env.time or 0) + dtime
 	
 	-- Check node below NPC
 	if (self.timers.node_below_value > self.timers.node_below_int) then
@@ -4083,13 +4256,18 @@ npc.do_step = function(self, dtime, moveresult)
 					self.process.current.instruction =
 						program_table[self.process.current.name].initial_instruction
 				else
-					-- No more instructions, dequeue process
-					local next_head = (self.process.queue_head + 1) % 100
-					if next_head == 0 then next_head = 1 end
-					self.process.queue[self.process.queue_head] = nil
+					-- No more instructions: dequeue the front entry and
+					-- compact the dense queue (queue[1] stays the next
+					-- program), so indices never outlive the live depth.
+					local queue = self.process.queue
+					local tail = self.process.queue_tail
+					for i = 1, tail - 1 do
+						queue[i] = queue[i + 1]
+					end
+					queue[tail] = nil
+					self.process.queue_tail = tail - 1
 					self.process.current.name = nil
 					self.process.current.instruction = -1
-					self.process.queue_head = next_head
 					-- Clear memory of the dequeued process
 					self.data.proc[self.process.current.id] = nil
 				end
@@ -4097,36 +4275,32 @@ npc.do_step = function(self, dtime, moveresult)
 				-- minetest.log("Condition: "..dump(self.process.queue))
 				-- minetest.log("Condition: "..dump(self.process.queue[self.process.queue_head]))
 				
-				-- Step 2: Check if there is another process in queue.
-				-- If there is, execute that process.
-				-- If there's not, then execute the default state process
-				if self.process.queue[self.process.queue_head] == nil then
-					-- If there's a process at the end of tail, execute that one
-					if self.process.queue[self.process.queue_tail] ~= nil then
-						self.process.current = self.process.queue[self.process.queue_tail]
-						-- Reset head and tail
-						self.process.queue_head = 1
-						self.process.queue_tail = 1
-					-- Else, just execute state process
-					else
-						-- Execute state process, if present
-						if self.process.state.name ~= nil then
-							self.process.current.id = self.process.state.id
-							self.process.current.name = self.process.state.name
-							self.process.current.args = self.process.state.args
-							self.process.current.instruction =
-								program_table[self.process.current.name].initial_instruction
-							self.process.queue[self.process.queue_head] = self.process.current
-						end
-					end	
-				end 
+				-- Step 2: Promote the next queued program in the same pass,
+				-- so a finished program hands off immediately instead of
+				-- stalling a whole process step. The queue is a dense
+				-- 1-based array, so queue[1] is the next program (O(1)).
+				if self.process.queue_tail >= 1 then
+					self.process.current = self.process.queue[1]
+					resume_after_execute(self.process)
+				-- Else, just execute state process
+				else
+					-- Execute state process, if present. It runs outside
+					-- the queue, which only holds one-shot programs.
+					if self.process.state.name ~= nil then
+						self.process.current.id = self.process.state.id
+						self.process.current.name = self.process.state.name
+						self.process.current.args = self.process.state.args
+						self.process.current.instruction =
+							program_table[self.process.current.name].initial_instruction
+					end
+				end
 			end
 		-- If there's no current process, then try to find one to execute
 		else
-			-- Check if there is a process in queue
-			if (self.process.queue_tail > self.process.queue_head)
-				or (self.process.queue[self.process.queue_head] ~= nil) then
-				self.process.current = self.process.queue[self.process.queue_head]
+			-- Check if there is a process in queue (queue[1] is next)
+			if self.process.queue_tail >= 1 then
+				self.process.current = self.process.queue[1]
+				resume_after_execute(self.process)
 
 			-- Check if there is a state process
 			elseif self.process.state.name ~= nil then
@@ -4135,7 +4309,6 @@ npc.do_step = function(self, dtime, moveresult)
 				self.process.current.args = self.process.state.args
 				self.process.current.instruction =
 					program_table[self.process.current.name].initial_instruction
-				self.process.queue[self.process.queue_head] = self.process.current
 			end
 		end
 
@@ -4197,6 +4370,29 @@ npc.on_activate = function(self, staticdata)
 		self["process"] = minetest.deserialize(cols[3])
 		self["data"] = minetest.deserialize(cols[4])
 		self["debug"] = minetest.deserialize(cols[5])
+		-- Normalize the process queue to the dense 1-based layout
+		-- (queue[1] = next program, queue_tail = length). Old saves may
+		-- be sparse (head/tail indices with nil holes) and may hold a
+		-- stale state-process entry; neither belongs in the new queue.
+		local queue = self.process.queue or {}
+		local dense = {}
+		local count = 0
+		local max_index = 0
+		for i in pairs(queue) do
+			if i > max_index then
+				max_index = i
+			end
+		end
+		for i = 1, max_index do
+			local entry = queue[i]
+			if entry ~= nil and entry.name ~= nil and entry.name ~= self.process.state.name then
+				count = count + 1
+				dense[count] = entry
+			end
+		end
+		self.process.queue = dense
+		self.process.queue_head = 1
+		self.process.queue_tail = count
 		-- Restore objects
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 		--minetest.log("Data: "..dump(self))
@@ -4229,7 +4425,7 @@ npc.on_activate = function(self, staticdata)
 				args = {}
 			},
 			queue_head = 1,
-			queue_tail = 1,
+			queue_tail = 0,
 			queue = {},
 			low_latency_task_stack = {},
 			low_latency_task = {
@@ -4551,6 +4747,36 @@ minetest.register_craftitem("anpc:follow_item", {
 				follow_distance = 2,
 			}, true)
 		end
+		return itemstack
+	end
+})
+
+-- Punch test item: left-click an anpc NPC with it to make that NPC
+-- punch the clicking player (5 m reach, so it works from a normal
+-- click distance; the swing plays the model's mine_once animation
+-- until a real "punch" animation is registered). Only works on
+-- engine NPCs (the pointed object must have the proc machinery).
+-- The result status is logged on the server.
+minetest.register_craftitem("anpc:punch_item", {
+	description = "Punch (test)",
+	inventory_image = "default_bow.png",
+	on_use = function(itemstack, user, pointed_thing)
+		if user == nil or pointed_thing == nil
+			or pointed_thing.type ~= "object" then
+			return itemstack
+		end
+		local npc_ent = pointed_thing.ref:get_luaentity()
+		-- Only engine NPCs: they have the data/process tables set up
+		-- in npc.on_activate.
+		if npc_ent == nil or npc_ent.data == nil
+			or npc_ent.process == nil or npc_ent.process.state == nil then
+			return itemstack
+		end
+		local result = _npc.obj.punch(npc_ent, {
+			name = user:get_player_name(),
+			max_reach = 5,
+		})
+		minetest.log("[anpc] punch test: " .. tostring(result))
 		return itemstack
 	end
 })
