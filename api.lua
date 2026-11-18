@@ -452,18 +452,36 @@ end
 -----------------------------------------------------------------------------------
 -- Scheduling functions
 -----------------------------------------------------------------------------------
--- The scheduling functionality is as follows:
+-- Scheduled interrupts: time-triggered program execution, checked every
+-- do_step (_npc.schedule.tick, called from npc.do_step).
+--
 --   - A scheduled entry has the following parameters:
---     - earliest start time
---     - latest start time
---	   - recurrency type
---     - repeat interval
---     - end time (if repeat interval given, if not given, repeat always)
---     - dependent schedule entry ID
---   - A schedule entry is for a *single* job
---   - A scheduled job will be priority-enqueued (using npc.execute_program)
---     - If this job sets a state process, it needs to state how to do it (e.g.
---       future state vs. immediate state process)
+--     - program + args        the program to fire
+--     - earliest/latest       start window on the game clock (the @time
+--                             scale, 0..23999, 1 day = 24000); latest <
+--                             earliest wraps midnight
+--     - recurrency            "none" (fire once) or "daily" (re-arm every
+--                             day). Weekly/monthly/yearly: TODO.
+--     - repeat_interval       game-time between repeats inside the window
+--     - end_time              game-clock after which repeats stop (only
+--                             enforced for non-wrapping windows)
+--     - preemption            "park" (default, priority-enqueued via
+--                             npc.proc.execute_program - a running one-shot
+--                             stays parked in the queue and resumes after
+--                             the scheduled program), "tail" (enqueue after
+--                             everything pending), "replace" (drop pending
+--                             one-shots, run this now)
+--   - A schedule entry is for a *single* job. If the job needs a new state
+--     process, the program itself calls npc:set_default_program.
+--   - dependent_entry_id is reserved (layout only, not implemented yet).
+--
+-- Entries are persisted in self.data.schedule (id-keyed map; ids come from
+-- self.data.schedule_key so removing one entry never renumbers the rest).
+-- Runtime fields: status ("idle" | "running" | "done"), fired, next_start,
+-- program_id (the process id of the last fired run, used to detect
+-- completion: the entry is active while that id is the current process or
+-- parked anywhere in the queue - children spawned by the scheduled program
+-- keep the parent parked via the npc:execute mechanism).
 -----------------------------------------------------------------------------------
 
 -- TODO: Support weekly, monthly and yearly recurrencies
@@ -472,29 +490,196 @@ npc.schedule.recurrency_type = {
 	["daily"] = "daily"
 }
 
--- This function adds an entry (as defined above) to the NPC's schedule
--- data.
-_npc.proc.schedule_add = function(self, args)
+_npc.schedule = {}
 
-	self.data.schedule[#self.data.schedule + 1] = {
-		program_name = args.program_name,
-		earliest_start_time = args.earliest_start_time,
-		latest_start_time = args.latest_start_time,
-		repeat_interval = args.repeat_interval,
-		end_time = args.end_time,
-		dependent_entry_id = args.dependent_entry_id
-	}
-
-	return #self.data.schedule
+-- Game clock in the @time scale (0..23999), same value programs see via the
+-- @time storage type.
+_npc.schedule.now = function()
+	return math.floor(24000 * minetest.get_timeofday())
 end
 
-_npc.proc.schedule_remove = function(self, args)
-	if self.data.schedule[args.entry_id] ~= nil then
-		self.data.schedule[args.entry_id] = nil
-		return true
+_npc.schedule.in_window = function(now, earliest, latest)
+	if earliest == latest then return true end
+	if latest > earliest then
+		return now >= earliest and now < latest
 	else
-		return false
+		return now >= earliest or now < latest
 	end
+end
+
+-- The entry's last fired program is still active if its process id is the
+-- current process or is parked anywhere in the queue.
+_npc.schedule.active = function(self, e)
+	if e.program_id == nil then return false end
+	if self.process.current.id == e.program_id then return true end
+	for i = 1, self.process.queue_tail do
+		if self.process.queue[i].id == e.program_id then return true end
+	end
+	return false
+end
+
+-- Fire the entry now. park/replace preemption reuses the queue-head
+-- invariant: a running one-shot IS queue[1] and only leaves the queue when
+-- it finishes, so the head-insert of execute_program parks it as-is. The
+-- parked program resumes at its current pointer - it never ran the
+-- following instruction, so no advance is needed (unlike npc:execute,
+-- which already consumed its call instruction and sets called_execute).
+_npc.schedule.fire = function(self, e, now)
+	e.program_id = self.process.key
+	e.status = "running"
+	e.fired = true
+	local ok, err = pcall(function()
+		if e.preemption == "tail" then
+			npc.proc.enqueue_program(self, e.program, e.args)
+		elseif e.preemption == "replace" then
+			self.process.queue = {}
+			self.process.queue_tail = 0
+			self.process.current = {}
+			npc.proc.execute_program(self, e.program, e.args)
+		else
+			npc.proc.execute_program(self, e.program, e.args)
+		end
+	end)
+	if not ok then
+		e.status = "done"
+		e.program_id = nil
+		minetest.log("error", "[anpc] schedule: failed to fire program '"
+			.. tostring(e.program) .. "' (entry ".. tostring(e.id) .. "): " .. tostring(err))
+		return
+	end
+	if e.recurrency == "daily" and e.repeat_interval then
+		e.next_start = now + e.repeat_interval
+	end
+end
+
+-- Per-do_step driver. Cheap: O(#entries) with a tiny schedule. At most one
+-- entry fires per step (id order) so overlapping windows don't cascade
+-- preemptions in a single pass.
+_npc.schedule.tick = function(self)
+	local sched = self.data.schedule
+	if not sched or next(sched) == nil then return end
+
+	local now = _npc.schedule.now()
+	local last = self.data.env.last_tick
+	local rollover = (last ~= nil) and (now < last)
+	self.data.env.last_tick = now
+
+	local fired_this_step = false
+	local ids = {}
+	for id in pairs(sched) do ids[#ids + 1] = id end
+	table.sort(ids)
+	for _, id in ipairs(ids) do
+		local e = sched[id]
+		if e.status == "running" then
+			if not _npc.schedule.active(self, e) then
+				if e.recurrency == "none" then
+					e.status = "done"
+				else
+					e.status = "idle"
+					e.fired = false
+					e.next_start = e.earliest
+				end
+			end
+		elseif e.status == "idle" then
+			-- Day rollover: re-arm daily entries for the new day
+			if rollover and e.recurrency == "daily" then
+				e.fired = false
+				e.next_start = e.earliest
+			end
+			-- Repeats stop once the game clock passes end_time. Only
+			-- meaningful for non-wrapping windows - with a wrapping
+			-- window the comparison is ambiguous, so it is ignored there.
+			if e.end_time ~= nil and e.latest >= e.earliest and now >= e.end_time then
+				e.status = "done"
+			elseif not e.fired
+				and _npc.schedule.in_window(now, e.earliest, e.latest)
+				and now >= e.next_start
+				and not fired_this_step then
+				fired_this_step = true
+				_npc.schedule.fire(self, e, now)
+			end
+		end
+	end
+end
+
+-- Add an entry. `args` is the (already evaluated) program argument table.
+-- The program is not required to be registered yet - it is validated at
+-- fire time (a failure there marks the entry done and logs the error).
+_npc.schedule.add = function(self, args)
+	local sched = self.data.schedule
+	local id = (self.data.schedule_key or 0) + 1
+	self.data.schedule_key = id
+	local earliest = args.earliest or 0
+	sched[id] = {
+		id = id,
+		program = args.program,
+		args = args.args,
+		earliest = earliest,
+		latest = args.latest or 24000,
+		recurrency = args.recurrency or "daily",
+		repeat_interval = args.repeat_interval,
+		end_time = args.end_time,
+		preemption = args.preemption or "park",
+		status = "idle",
+		fired = false,
+		next_start = earliest,
+		program_id = nil,
+	}
+	if args.program == nil or program_table[args.program] == nil then
+		minetest.log("warning", "[anpc] schedule: program '"
+			.. tostring(args.program) .. "' is not registered yet; it will be validated when the entry fires")
+	end
+	if args.recurrency ~= nil and npc.schedule.recurrency_type[args.recurrency] == nil then
+		minetest.log("warning", "[anpc] schedule: unknown recurrency '"
+			.. tostring(args.recurrency) .. "', using 'daily'")
+		sched[id].recurrency = "daily"
+	end
+	if args.preemption ~= nil and args.preemption ~= "park"
+			and args.preemption ~= "tail" and args.preemption ~= "replace" then
+		minetest.log("warning", "[anpc] schedule: unknown preemption '"
+			.. tostring(args.preemption) .. "', using 'park'")
+		sched[id].preemption = "park"
+	end
+	return id
+end
+
+-- Remove an entry. Running entries can't be removed (their program is in
+-- flight); remove after it finishes. Ids are stable - removal never
+-- renumbers the other entries.
+_npc.schedule.remove = function(self, args)
+	local e = self.data.schedule[args.entry_id]
+	if e == nil then return false end
+	if e.status == "running" then return false end
+	self.data.schedule[args.entry_id] = nil
+	return true
+end
+
+-- Force-fire an entry now, bypassing the window check (testing, "do it
+-- now"). Re-arms "done" entries. Returns false for unknown or running ids.
+--
+-- Unlike the tick path, this runs from inside a program's main loop: the
+-- step's execution slot was already consumed by the calling instruction.
+-- For park/replace (which swap `current`) that means two things, exactly
+-- like npc:execute: mark called_execute so resume_after_execute advances
+-- the parent past the trigger instruction on promotion (it must not run
+-- it again - a re-armed "none" entry would fire a second time), and hold
+-- the new program's pointer at its first instruction via program_changed.
+-- "tail" leaves `current` running, so neither applies.
+_npc.schedule.trigger = function(self, args)
+	local e = self.data.schedule[args.entry_id]
+	if e == nil or e.status == "running" then return false end
+	e.status = "idle"
+	e.fired = false
+	e.next_start = _npc.schedule.now()
+	local swapped = e.preemption ~= "tail"
+	if swapped then
+		self.process.current.called_execute = true
+	end
+	_npc.schedule.fire(self, e, e.next_start)
+	if e.status == "running" and swapped then
+		self.process.program_changed = true
+	end
+	return e.status == "running"
 end
 
 -----------------------------------------------------------------------------------
@@ -1246,6 +1431,48 @@ end)
 
 npc.proc.register_instruction("npc:timer:instr:stop", function(self, args)
 	self.timers.instr_timer = nil
+end)
+
+-----------------------------------------------------------------------------------
+-- Scheduling instructions
+-----------------------------------------------------------------------------------
+-- npc:schedule:add(program, args?, earliest?, latest?, recurrency?,
+--                  repeat_interval?, end_time?, preemption?) -> entry id
+npc.proc.register_instruction("npc:schedule:add", function(self, args, raw_args)
+	-- args.args is nested: the standard argument pass doesn't recurse into
+	-- it, so evaluate it like npc:execute does. Live userdata (e.g. an
+	-- @objs result) must become a tracking record before it is stored -
+	-- userdata in the process data would crash the save serialization.
+	local processed_args = {}
+	if args.args then
+		for arg_key, arg_value in pairs(args.args) do
+			processed_args[arg_key] =
+				_npc.dsl.evaluate_argument(self, arg_value, raw_args, self.data.proc[self.process.current.id])
+			if type(processed_args[arg_key]) == "userdata" then
+				processed_args[arg_key] = _npc.dsl.generate_tracking_record(self, processed_args[arg_key])
+			end
+		end
+	end
+	return _npc.schedule.add(self, {
+		program = args.program,
+		args = processed_args,
+		earliest = args.earliest,
+		latest = args.latest,
+		recurrency = args.recurrency,
+		repeat_interval = args.repeat_interval,
+		end_time = args.end_time,
+		preemption = args.preemption,
+	})
+end)
+
+-- npc:schedule:remove(entry_id) -> bool (running entries can't be removed)
+npc.proc.register_instruction("npc:schedule:remove", function(self, args)
+	return _npc.schedule.remove(self, args)
+end)
+
+-- npc:schedule:trigger(entry_id) -> bool (fire now, bypassing the window)
+npc.proc.register_instruction("npc:schedule:trigger", function(self, args)
+	return _npc.schedule.trigger(self, args)
 end)
 
 -----------------------------------------------------------------------------------
@@ -4821,8 +5048,8 @@ npc.do_step = function(self, dtime, moveresult)
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 	end
 
-	-- TODO: Implement scheduled interrupts
-	--       e.g. npc:event:schedule(time = 22000, name = "program_name")
+	-- Scheduled interrupts (npc:schedule:*) - time-triggered programs
+	_npc.schedule.tick(self)
 
 	-------------------------------------------------------------------------------
 	-- Low-latency tasks
@@ -5106,6 +5333,22 @@ npc.on_activate = function(self, staticdata)
 		self.process.queue = dense
 		self.process.queue_head = 1
 		self.process.queue_tail = count
+		-- Normalize the schedule to the id-keyed map layout and backfill the
+		-- runtime fields on old entries. schedule_key must stay >= the
+		-- highest live id so new entries never reuse an in-flight id.
+		local sched = self.data.schedule or {}
+		self.data.schedule_key = self.data.schedule_key or 0
+		for id, e in pairs(sched) do
+			if type(id) == "number" and id > self.data.schedule_key then
+				self.data.schedule_key = id
+			end
+			e.status = e.status or "idle"
+			e.fired = e.fired or false
+			e.next_start = e.next_start or e.earliest or 0
+			e.preemption = e.preemption or "park"
+			e.recurrency = e.recurrency or "daily"
+		end
+		self.data.schedule = sched
 		-- Restore objects
 		self.data.env.objects = minetest.get_objects_inside_radius(self.object:get_pos(), self.data.env.view_range)
 		--minetest.log("Data: "..dump(self))
@@ -5155,7 +5398,8 @@ npc.on_activate = function(self, staticdata)
 			proc = {},
 			temp = {},
 			nav = {},
-			schedule = {}
+			schedule = {},
+			schedule_key = 0
 		}
 		-- Prime the object table: the first refresh runs 1 s later, but
 		-- a program may resolve @objs arguments on its very first pass.
